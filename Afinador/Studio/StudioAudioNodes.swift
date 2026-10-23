@@ -671,6 +671,23 @@ final class StudioLevelMeters: @unchecked Sendable {
         lock.unlock()
     }
 
+    private var clipped = false
+
+    /// A entrada chegou ao máximo (cortou) antes do ganho do app.
+    func reportClip() {
+        lock.lock()
+        clipped = true
+        lock.unlock()
+    }
+
+    func takeClip() -> Bool {
+        lock.lock()
+        let c = clipped
+        clipped = false
+        lock.unlock()
+        return c
+    }
+
     func reportTrack(_ id: UUID, _ level: Float) {
         lock.lock()
         tracks[id] = max(tracks[id] ?? 0, level)
@@ -715,6 +732,7 @@ enum StudioTaps {
     static func inputTap(meters: StudioLevelMeters, recorder: StudioTakeRecorder,
                          gain: StudioInputGain) -> AVAudioNodeTapBlock {
         return { buffer, when in
+            if rawPeak(of: buffer) >= 0.98 { meters.reportClip() }
             gain.apply(to: buffer)
             meters.reportInput(StudioLevelMeters.normalizedPeak(of: buffer))
             recorder.process(buffer, when: when)

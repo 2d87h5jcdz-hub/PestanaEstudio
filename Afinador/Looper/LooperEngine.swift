@@ -88,6 +88,14 @@ final class LooperEngine: ObservableObject {
         }
     }
     @Published private(set) var volumes: [Float]
+    @Published private(set) var inputClipping = false
+    private var clipUntil = Date.distantPast
+    private let clipFlag = LoopClipFlag()
+    @Published private(set) var hardwareGainSettable = false
+    @Published var hardwareGain: Float = 0.5 {
+        didSet { if !syncingHardwareGain { HardwareInputGain.set(hardwareGain) } }
+    }
+    private var syncingHardwareGain = false
 
     // MARK: Modo automático (tempo e compassos)
 
@@ -281,6 +289,10 @@ final class LooperEngine: ObservableObject {
         newEngine.attach(mixer)
         newEngine.attach(looperNode)
         newEngine.connect(input, to: eq, format: inFormat)
+        let flag = clipFlag
+        input.installTap(onBus: 0, bufferSize: 1024, format: nil) { buffer, _ in
+            if rawPeak(of: buffer) >= 0.98 { flag.set() }
+        }
         newEngine.connect(eq, to: mixer, format: inFormat)
         effectChain.install(in: newEngine, from: mixer, to: looperNode, format: format)
         newEngine.connect(looperNode, to: newEngine.mainMixerNode, format: format)
@@ -310,6 +322,7 @@ final class LooperEngine: ObservableObject {
     private func teardownEngine() {
         engineConfigCancellable = nil
         guard let old = engine else { return }
+        old.inputNode.removeTap(onBus: 0)
         old.stop()
         for node in effectChain.nodes + [looperNode] where node.engine === old {
             old.detach(node)
@@ -394,6 +407,12 @@ final class LooperEngine: ObservableObject {
         let route = AVAudioSession.sharedInstance().currentRoute
         let safe: Set<AVAudioSession.Port> = [.headphones, .bluetoothA2DP, .bluetoothLE, .bluetoothHFP, .usbAudio, .lineOut]
         isHeadphoneConnected = route.outputs.contains { safe.contains($0.portType) }
+        hardwareGainSettable = HardwareInputGain.isSettable
+        if hardwareGainSettable {
+            syncingHardwareGain = true
+            hardwareGain = HardwareInputGain.value
+            syncingHardwareGain = false
+        }
         if let input = route.inputs.first {
             switch input.portType {
             case .builtInMic: inputName = "Microfone do iPhone"
@@ -548,7 +567,18 @@ final class LooperEngine: ObservableObject {
         if baseSeconds != looper.baseSeconds { baseSeconds = looper.baseSeconds }
         positionSeconds = looper.positionSeconds
         inputLevel = looper.inputLevel
+        if clipFlag.take() { clipUntil = Date().addingTimeInterval(2) }
+        let clipping = Date() < clipUntil
+        if clipping != inputClipping { inputClipping = clipping }
         if phase != looper.phase { phase = looper.phase }
         if beat != looper.currentBeat { beat = looper.currentBeat }
     }
+}
+
+/// Marca, vinda da thread de áudio, de que a entrada cortou (chegou ao máximo).
+final class LoopClipFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    func set() { lock.lock(); value = true; lock.unlock() }
+    func take() -> Bool { lock.lock(); let v = value; value = false; lock.unlock(); return v }
 }

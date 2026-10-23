@@ -467,6 +467,8 @@ struct StudioInputPanel: View {
                 .accessibilityLabel("Nível da entrada")
                 .accessibilityValue("\(Int(studio.inputLevel * 100)) por cento")
             gainRow
+            if studio.hardwareGainSettable { hardwareGainRow }
+            if studio.inputClipping { clipWarning }
             Divider().overlay(Color.line)
             monitorRow
             if studio.monitorEnabled && !studio.isHeadphoneConnected {
@@ -518,6 +520,37 @@ struct StudioInputPanel: View {
         }
         .disabled(studio.transport != .stopped || studio.availableInputs.count < 2)
         .accessibilityLabel("Entrada de áudio: \(studio.inputName). Toque para trocar.")
+    }
+
+    /// Ganho do pré-amplificador do aparelho (antes do app). Só aparece quando a entrada deixa ajustar.
+    private var hardwareGainRow: some View {
+        HStack(spacing: 10) {
+            Text("No aparelho")
+                .font(.system(size: 13))
+                .foregroundColor(.muted)
+            Slider(value: $studio.hardwareGain, in: 0...1)
+                .tint(Color.brass)
+            Text("\(Int((studio.hardwareGain * 100).rounded()))%")
+                .font(.system(size: 13, design: .monospaced))
+                .foregroundColor(.fg)
+                .frame(width: 58, alignment: .trailing)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Ganho do aparelho, \(Int((studio.hardwareGain * 100).rounded())) por cento")
+    }
+
+    private var clipWarning: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundColor(.off)
+                .accessibilityHidden(true)
+            Text(studio.hardwareGainSettable
+                 ? "A entrada está estourando antes do app. Baixe o ganho \"No aparelho\" ou afaste o microfone."
+                 : "A entrada está estourando antes do app (o ganho do app não resolve). Afaste o microfone, baixe o ganho no próprio microfone/adaptador ou toque mais leve.")
+                .font(.system(size: 13))
+                .foregroundColor(.off)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     /// Ganho digital da entrada (0 a +24 dB).

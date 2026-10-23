@@ -75,6 +75,16 @@ final class StudioEngine: ObservableObject {
     /// uid da entrada em uso.
     @Published private(set) var selectedInputID: String?
     /// Ganho digital da entrada, em dB (0…+24). Vale para o monitoramento, o medidor e a gravação.
+    /// A entrada está estourando antes do app (fica true por ~2 s depois do último corte).
+    @Published private(set) var inputClipping = false
+    private var clipUntil = Date.distantPast
+    /// Ganho do aparelho (0…1), quando a entrada deixa ajustar.
+    @Published private(set) var hardwareGainSettable = false
+    @Published var hardwareGain: Float = 0.5 {
+        didSet { if !syncingHardwareGain { HardwareInputGain.set(hardwareGain) } }
+    }
+    private var syncingHardwareGain = false
+
     @Published var inputGainDB: Float = 0 {
         didSet {
             let clamped = min(24, max(0, inputGainDB))
@@ -791,6 +801,12 @@ final class StudioEngine: ObservableObject {
             .headphones, .bluetoothA2DP, .bluetoothLE, .bluetoothHFP, .usbAudio, .lineOut,
         ]
         isHeadphoneConnected = route.outputs.contains { safePorts.contains($0.portType) }
+        hardwareGainSettable = HardwareInputGain.isSettable
+        if hardwareGainSettable {
+            syncingHardwareGain = true
+            hardwareGain = HardwareInputGain.value
+            syncingHardwareGain = false
+        }
     }
 
     private func handleRouteChange(_ note: Notification) {
@@ -1190,6 +1206,9 @@ final class StudioEngine: ObservableObject {
     }
 
     private func tick() {
+        if meters.takeClip() { clipUntil = Date().addingTimeInterval(2) }
+        let clipping = Date() < clipUntil
+        if clipping != inputClipping { inputClipping = clipping }
         let levels = meters.take()
         let smoothedInput = max(levels.input, inputLevel * 0.82)
         let newInput: Float = smoothedInput < 0.01 ? 0 : smoothedInput

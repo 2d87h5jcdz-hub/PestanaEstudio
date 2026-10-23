@@ -184,6 +184,23 @@ struct LoopView: View {
                     .foregroundColor(.fg)
                 }
             }
+            if looper.hardwareGainSettable {
+                HStack(spacing: 10) {
+                    Text("Ganho no aparelho").font(.system(size: 13)).foregroundColor(.muted)
+                    Slider(value: $looper.hardwareGain, in: 0...1).tint(Color.brass)
+                    Text("\(Int((looper.hardwareGain * 100).rounded()))%")
+                        .font(.system(size: 13, design: .monospaced))
+                        .frame(width: 48, alignment: .trailing)
+                }
+            }
+            if looper.inputClipping {
+                Text(looper.hardwareGainSettable
+                     ? "A entrada está estourando antes do app. Baixe o ganho no aparelho ou afaste o microfone."
+                     : "A entrada está estourando antes do app. Afaste o microfone, baixe o ganho no próprio microfone/adaptador ou toque mais leve.")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(.off)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             Toggle(isOn: $looper.monitorEnabled) {
                 Text("Ouvir a entrada")
                     .font(.system(size: 14))
