@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Gera o modelo Core ML do separador de instrumentos (Demucs v4 / HTDemucs, Meta, licença MIT)
-no formato que Afinador/Practice/DemucsSeparator.swift espera.
+no formato que Afinador/Features/Practice/DemucsSeparator.swift espera.
 
 CONTRATO (afinador-demucs-v1) — igual ao das conversões públicas schism-audio/htdemucs*-coreml:
 

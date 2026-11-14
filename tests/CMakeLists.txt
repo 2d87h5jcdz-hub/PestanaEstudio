@@ -20,9 +20,9 @@ if(PESTANA_SANITIZE AND PESTANA_TSAN)
 endif()
 
 set(RAIZ ${CMAKE_CURRENT_SOURCE_DIR}/..)
-set(DSP_LOOPER ${RAIZ}/Afinador/Looper)
-set(DSP_NOISE ${RAIZ}/Afinador/Noise)
-set(DSP_GUITAR ${RAIZ}/Afinador/GuitarFX)
+set(DSP_LOOPER ${RAIZ}/Afinador/Core/DSP)
+set(DSP_NOISE ${RAIZ}/Afinador/Core/DSP)
+set(DSP_GUITAR ${RAIZ}/Afinador/Core/DSP)
 set(VENDOR ${RAIZ}/Vendor)
 
 if(PESTANA_SANITIZE)
