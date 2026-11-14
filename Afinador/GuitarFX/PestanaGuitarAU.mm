@@ -45,12 +45,25 @@ struct RenderScratch {
   });
 }
 
+/// Texto do erro para a tela (a mensagem do NAM pode ter bytes que não são UTF-8).
+static NSString *PestanaErrorString(const std::string &message) {
+  NSString *text = [NSString stringWithUTF8String:message.c_str()];
+  return text.length > 0 ? text : @"arquivo inválido.";
+}
+
 + (nullable NSString *)validateModelAtPath:(NSString *)path {
-  pestana::GuitarFXCore core;
-  core.prepare(48000.0, 512, 1);
-  std::string error;
-  if (core.loadModel(std::string(path.fileSystemRepresentation), error)) return nil;
-  return [NSString stringWithUTF8String:error.c_str()] ?: @"arquivo inválido";
+  // Nenhuma exceção C++ pode atravessar para o Objective-C/Swift: derrubaria o app.
+  try {
+    pestana::GuitarFXCore core;
+    core.prepare(48000.0, 512, 1);
+    std::string error;
+    if (core.loadModel(std::string(path.fileSystemRepresentation), error)) return nil;
+    return PestanaErrorString(error);
+  } catch (const std::bad_alloc &) {
+    return @"faltou memória para abrir o modelo.";
+  } catch (...) {
+    return @"erro desconhecido ao ler o modelo.";
+  }
 }
 
 - (instancetype)initWithComponentDescription:(AudioComponentDescription)componentDescription
@@ -128,8 +141,14 @@ struct RenderScratch {
 
 - (BOOL)loadAmpModelAtPath:(NSString *)path error:(NSString * _Nullable * _Nullable)error {
   std::string message;
-  const bool ok = _core->loadModel(std::string(path.fileSystemRepresentation), message);
-  if (!ok && error != nil) *error = [NSString stringWithUTF8String:message.c_str()];
+  bool ok = false;
+  try {
+    ok = _core->loadModel(std::string(path.fileSystemRepresentation), message);
+  } catch (...) {
+    ok = false;
+    message = "erro desconhecido ao ler o modelo.";
+  }
+  if (!ok && error != nil) *error = PestanaErrorString(message);
   return ok ? YES : NO;
 }
 

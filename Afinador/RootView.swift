@@ -50,6 +50,8 @@ struct ContentView: View {
     @StateObject private var looper = LooperEngine()
     @State private var tab = 0
     @Environment(\.scenePhase) private var scenePhase
+    /// Fase atual da cena guardada (para soltar o áudio quando a atividade termina em segundo plano).
+    @State private var inBackground = false
     /// Aviso de boas-vindas (gratuito / doação) só na primeira abertura.
     @AppStorage("about.welcomeShown") private var welcomeShown = false
 
@@ -94,6 +96,11 @@ struct ContentView: View {
         }
         .tint(Color.brass)
         .onChange(of: scenePhase) { phase in handleScenePhase(phase) }
+        .onChange(of: studio.transport) { _ in releaseIfFinishedInBackground() }
+        .onChange(of: studio.monitorEnabled) { _ in releaseIfFinishedInBackground() }
+        .onChange(of: looper.isIdleForBackground) { idle in
+            if idle { releaseIfFinishedInBackground() }
+        }
         .onChange(of: tab) { newTab in
             // O metrônomo da aba própria vazaria nas gravações e brigaria com o clique do Estúdio/Treino.
             if newTab >= 3 && metronome.playing { metronome.stop() }
@@ -106,6 +113,7 @@ extension ContentView {
     /// gravando, tocando, contando ou ouvindo a entrada. O resto solta o microfone e a bateria.
     /// O Treino cuida de si mesmo (PracticeView). O metrônomo segue tocando se estiver ligado.
     fileprivate func handleScenePhase(_ phase: ScenePhase) {
+        inBackground = phase == .background
         switch phase {
         case .background:
             if tab == 0 { tuner.stop() }
@@ -118,6 +126,14 @@ extension ContentView {
         default:
             break
         }
+    }
+
+    /// Já em segundo plano: quando a música do Estúdio acaba ou o Loop fica ocioso, desliga o motor
+    /// como ao entrar em segundo plano. Ao voltar (.active) a aba religa sozinha.
+    fileprivate func releaseIfFinishedInBackground() {
+        guard inBackground else { return }
+        if tab == 3 && studio.transport == .stopped && !studio.monitorEnabled { studio.deactivate() }
+        if tab == 5 && looper.running && looper.isIdleForBackground { looper.stop() }
     }
 }
 

@@ -11,6 +11,8 @@ struct PracticeView: View {
     @State private var showImporter = false
     @State private var sendingToStudio = false
     @State private var visible = false
+    /// Fase atual da cena guardada: o fim da música em segundo plano também solta o áudio.
+    @State private var inBackground = false
     @Environment(\.scenePhase) private var scenePhase
 
     private static let audioTypes: [UTType] = [.audio, .mp3, .mpeg4Audio, .wav, .aiff]
@@ -32,9 +34,14 @@ struct PracticeView: View {
         .onDisappear { visible = false; engine.deactivate() }
         .onChange(of: scenePhase) { phase in
             // Em segundo plano a música continua tocando; parada, solta o áudio.
+            inBackground = phase == .background
             guard visible else { return }
             if phase == .background && !engine.isPlaying { engine.deactivate() }
             if phase == .active { engine.activate() }
+        }
+        .onChange(of: engine.isPlaying) { playing in
+            // Já em segundo plano e a música parou (acabou): desliga o motor também.
+            if inBackground && visible && !playing { engine.deactivate() }
         }
     }
 

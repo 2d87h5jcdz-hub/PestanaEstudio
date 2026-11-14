@@ -30,13 +30,18 @@ enum StudioAmps {
         (name as NSString).deletingPathExtension
     }
 
+    /// Maior .nam aceito (o mesmo limite do GuitarFXCore).
+    static let maxModelBytes: Int = 50 * 1024 * 1024
+
     enum ImportError: LocalizedError {
         case notNAM
+        case tooLarge
         case invalid(String)
         case copy(String)
         var errorDescription: String? {
             switch self {
             case .notNAM: return "Escolha um arquivo .nam (modelo do Neural Amp Modeler)."
+            case .tooLarge: return "Esse arquivo é grande demais para um modelo .nam (máximo de 50 MB)."
             case .invalid(let why): return "Esse modelo não abriu: \(why)"
             case .copy(let why): return "Não deu para copiar o arquivo: \(why)"
             }
@@ -48,6 +53,9 @@ enum StudioAmps {
         guard source.pathExtension.lowercased() == "nam" else { throw ImportError.notNAM }
         let scoped = source.startAccessingSecurityScopedResource()
         defer { if scoped { source.stopAccessingSecurityScopedResource() } }
+        // Confere o tamanho antes de copiar (um arquivo enorme nem chega a ser lido).
+        let values: URLResourceValues? = try? source.resourceValues(forKeys: [.fileSizeKey])
+        if let size: Int = values?.fileSize, size > maxModelBytes { throw ImportError.tooLarge }
         let temp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".nam")
         do {
             try FileManager.default.copyItem(at: source, to: temp)

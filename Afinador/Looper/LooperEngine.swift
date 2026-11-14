@@ -168,6 +168,10 @@ final class LooperEngine: ObservableObject {
         PestanaLooperAU.registerIfNeeded()
         looperNode = AVAudioUnitEffect(audioComponentDescription: PestanaLooperAU.pestanaComponentDescription())
         if let looper {
+            // Orçamento de memória dos loops: 1/4 da RAM do aparelho, no máximo 1,5 GB.
+            let quarter: UInt64 = ProcessInfo.processInfo.physicalMemory / 4
+            let cap: UInt64 = 1_536 * 1_024 * 1_024
+            looper.setMemoryBudget(Int64(min(quarter, cap)))
             looper.setMonitor(monitorEnabled)
             let mults = d.array(forKey: Keys.multipliers) as? [Int] ?? []
             for t in 0..<Self.maxTracks {
@@ -445,15 +449,26 @@ final class LooperEngine: ObservableObject {
         attemptPress(track, tries: 12)
     }
 
+    /// Valores de `lastPressError` (mesmos do LooperCore::PressError).
+    private static let pressErrorMemory: Int = 2
+
     /// Logo depois de fechar uma gravação a faixa ainda escreve a "cauda" (a latência); tenta de novo.
+    /// Sem memória não adianta tentar de novo: avisa na hora.
     private func attemptPress(_ track: Int, tries: Int) {
         guard let looper else { return }
         if looper.pressTrack(track) {
+            if looper.lastPressError == Self.pressErrorMemory {
+                lastError = "A sequência parou: memória cheia para as próximas faixas."
+            }
             refresh()
             return
         }
+        if looper.lastPressError == Self.pressErrorMemory {
+            lastError = "Memória cheia para mais uma camada. Desfaça ou apague uma faixa."
+            return
+        }
         guard tries > 0 else {
-            lastError = "Não deu para gravar agora (memória cheia?). Apague uma faixa e tente de novo."
+            lastError = "Não deu para gravar agora. Tente de novo."
             return
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.015) { [weak self] in
@@ -555,6 +570,8 @@ final class LooperEngine: ObservableObject {
     private func refresh() {
         guard let looper else { return }
         looper.collectGarbage()
+        // Junta camadas pendentes (main + old) em segundo plano; o resultado volta na principal.
+        looper.runPendingMerges()
         var next = tracks
         for t in 0..<Self.maxTracks {
             next[t] = TrackInfo(

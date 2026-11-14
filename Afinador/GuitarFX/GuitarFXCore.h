@@ -24,7 +24,12 @@ public:
   /// Fora da thread de áudio. Reserva buffers e prepara o modelo carregado.
   void prepare(double sampleRate, int maxFrames, int channels);
 
-  /// Fora da thread de áudio. Carrega um arquivo .nam; false + mensagem em caso de erro.
+  /// Maior .nam aceito (os modelos comuns têm poucos MB).
+  static constexpr long long kMaxModelBytes = 50LL * 1024 * 1024;
+
+  /// Fora da thread de áudio. Carrega um arquivo .nam; false + mensagem (em português) em caso de
+  /// erro. Confere tamanho, JSON e as chaves que o NAM exige antes de montar o modelo; nenhuma
+  /// exceção sai daqui.
   bool loadModel(const std::string& path, std::string& error);
   void clearModel();
   bool hasModel() const { return mModel.load() != nullptr; }

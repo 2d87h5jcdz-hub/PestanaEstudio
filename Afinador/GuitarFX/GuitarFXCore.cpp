@@ -2,8 +2,12 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <exception>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <system_error>
 
 #include "NAM/dsp.h"
 #include "NAM/get_dsp.h"
@@ -17,6 +21,38 @@ constexpr float kTargetLoudnessDB = -18.0f; // nível de saída padronizado dos 
 
 inline float dbToGain(float db) { return std::pow(10.0f, db / 20.0f); }
 inline float clampf(float v, float lo, float hi) { return std::min(hi, std::max(lo, v)); }
+
+/// Lê e confere o .nam antes de entregar ao NAM: o get_dsp do NAM acessa chaves com operator[] e
+/// um arquivo torto poderia passar do ponto. Mensagens em português para a tela.
+bool readModelJson(const std::string& path, nlohmann::json& out, std::string& error) {
+  std::error_code ec;
+  const std::filesystem::path p(path);
+  const auto size = std::filesystem::file_size(p, ec);
+  if (ec) { error = "não deu para ler o arquivo."; return false; }
+  if (size == 0) { error = "o arquivo está vazio."; return false; }
+  if (size > static_cast<std::uintmax_t>(GuitarFXCore::kMaxModelBytes)) {
+    error = "o arquivo é grande demais (máximo de 50 MB).";
+    return false;
+  }
+  std::ifstream input(p, std::ios::binary);
+  if (!input.is_open()) { error = "não deu para ler o arquivo."; return false; }
+  std::string text((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+  // allow_exceptions = false: JSON inválido vira "discarded" em vez de exceção.
+  out = nlohmann::json::parse(text, nullptr, false);
+  if (out.is_discarded() || !out.is_object()) {
+    error = "o arquivo não é um modelo .nam válido (o conteúdo não é JSON).";
+    return false;
+  }
+  const auto has = [&out](const char* key) { return out.find(key) != out.end(); };
+  if (!has("version") || !out["version"].is_string() ||
+      !has("architecture") || !out["architecture"].is_string() ||
+      !has("config") || !out["config"].is_object() ||
+      !has("weights") || !out["weights"].is_array()) {
+    error = "o arquivo não tem as partes de um modelo NAM (versão, arquitetura, configuração e pesos).";
+    return false;
+  }
+  return true;
+}
 } // namespace
 
 GuitarFXCore::GuitarFXCore() = default;
@@ -43,9 +79,20 @@ void GuitarFXCore::prepare(double sampleRate, int maxFrames, int channels) {
 
 bool GuitarFXCore::loadModel(const std::string& path, std::string& error) {
   try {
-    std::unique_ptr<nam::DSP> model = nam::get_dsp(std::filesystem::path(path));
+    nlohmann::json json;
+    if (!readModelJson(path, json, error)) return false;
+    std::unique_ptr<nam::DSP> model;
+    try {
+      model = nam::get_dsp(json);
+    } catch (const std::bad_alloc&) {
+      error = "faltou memória para abrir o modelo.";
+      return false;
+    } catch (const std::exception& e) {
+      error = std::string("o modelo usa um formato que o app não reconhece (") + e.what() + ").";
+      return false;
+    }
     if (!model) {
-      error = "modelo vazio";
+      error = "modelo vazio.";
       return false;
     }
     model->Reset(mSampleRate, mMaxFrames);
@@ -61,10 +108,12 @@ bool GuitarFXCore::loadModel(const std::string& path, std::string& error) {
     mNormGain.store(clampf(norm, 0.01f, 30.0f));
     mModel.store(raw);
     return true;
+  } catch (const std::bad_alloc&) {
+    error = "faltou memória para abrir o modelo.";
   } catch (const std::exception& e) {
-    error = e.what();
+    error = std::string("erro ao abrir o modelo (") + e.what() + ").";
   } catch (...) {
-    error = "erro desconhecido ao ler o modelo";
+    error = "erro desconhecido ao ler o modelo.";
   }
   return false;
 }
