@@ -111,8 +111,8 @@ final class PracticeEngine: ObservableObject {
         isActive = true
         let s = AVAudioSession.sharedInstance()
         do {
-            if s.category != .playAndRecord || !s.categoryOptions.contains(.defaultToSpeaker) {
-                try s.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothA2DP])
+            if s.category != .playAndRecord || s.categoryOptions != AudioSession.options {
+                try s.setCategory(.playAndRecord, mode: .default, options: AudioSession.options)
             }
             try s.setActive(true)
         } catch {

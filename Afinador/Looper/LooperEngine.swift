@@ -345,7 +345,7 @@ final class LooperEngine: ObservableObject {
         let session = AVAudioSession.sharedInstance()
         if previousIOBuffer == nil { previousIOBuffer = session.preferredIOBufferDuration }
         do {
-            try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothA2DP])
+            try session.setCategory(.playAndRecord, mode: .default, options: AudioSession.options)
             try session.setPreferredIOBufferDuration(0.005)
             try session.setActive(true)
             applyPreferredInput()
@@ -462,6 +462,12 @@ final class LooperEngine: ObservableObject {
     }
 
     func pressSelected() { press(selected) }
+
+    /// Nada acontecendo: pode soltar o microfone quando o app vai para segundo plano.
+    var isIdleForBackground: Bool {
+        if playing || phase != .none || (monitorEnabled && running) { return false }
+        return !tracks.contains { $0.state == .recording || $0.state == .overdubbing || $0.state == .armed }
+    }
 
     @Published private(set) var learningNoise = false
 

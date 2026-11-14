@@ -29,10 +29,14 @@ func rawPeak(of buffer: AVAudioPCMBuffer) -> Float {
 }
 
 enum AudioSession {
+    /// Opções da sessão em todo o app. `mixWithOthers`: um app de cifra (ou vídeo) tocando som
+    /// não interrompe a gravação nem o Treino/Loop em segundo plano.
+    static let options: AVAudioSession.CategoryOptions = [.defaultToSpeaker, .allowBluetoothA2DP, .mixWithOthers]
+
     static func activate() {
         let s = AVAudioSession.sharedInstance()
-        if s.category != .playAndRecord {
-            try? s.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothA2DP])
+        if s.category != .playAndRecord || s.categoryOptions != options {
+            try? s.setCategory(.playAndRecord, mode: .default, options: options)
         }
         try? s.setActive(true)
     }
@@ -45,6 +49,7 @@ struct ContentView: View {
     @StateObject private var studio = StudioEngine()
     @StateObject private var looper = LooperEngine()
     @State private var tab = 0
+    @Environment(\.scenePhase) private var scenePhase
     /// Aviso de boas-vindas (gratuito / doação) só na primeira abertura.
     @AppStorage("about.welcomeShown") private var welcomeShown = false
 
@@ -88,9 +93,30 @@ struct ContentView: View {
             AboutView(isWelcome: true)
         }
         .tint(Color.brass)
+        .onChange(of: scenePhase) { phase in handleScenePhase(phase) }
         .onChange(of: tab) { newTab in
             // O metrônomo da aba própria vazaria nas gravações e brigaria com o clique do Estúdio/Treino.
             if newTab >= 3 && metronome.playing { metronome.stop() }
+        }
+    }
+}
+
+extension ContentView {
+    /// Em segundo plano (outro app na frente) o áudio continua só onde há algo acontecendo:
+    /// gravando, tocando, contando ou ouvindo a entrada. O resto solta o microfone e a bateria.
+    /// O Treino cuida de si mesmo (PracticeView). O metrônomo segue tocando se estiver ligado.
+    fileprivate func handleScenePhase(_ phase: ScenePhase) {
+        switch phase {
+        case .background:
+            if tab == 0 { tuner.stop() }
+            if tab == 3 && studio.transport == .stopped && !studio.monitorEnabled { studio.deactivate() }
+            if tab == 5 && looper.isIdleForBackground { looper.stop() }
+        case .active:
+            if tab == 0 { tuner.start() }
+            if tab == 3 { studio.activate() }
+            if tab == 5 { looper.start() }
+        default:
+            break
         }
     }
 }

@@ -10,6 +10,8 @@ struct PracticeView: View {
     @StateObject private var engine = PracticeEngine()
     @State private var showImporter = false
     @State private var sendingToStudio = false
+    @State private var visible = false
+    @Environment(\.scenePhase) private var scenePhase
 
     private static let audioTypes: [UTType] = [.audio, .mp3, .mpeg4Audio, .wav, .aiff]
 
@@ -26,8 +28,14 @@ struct PracticeView: View {
         }, message: {
             Text(engine.lastError ?? "")
         })
-        .onAppear { engine.activate() }
-        .onDisappear { engine.deactivate() }
+        .onAppear { visible = true; engine.activate() }
+        .onDisappear { visible = false; engine.deactivate() }
+        .onChange(of: scenePhase) { phase in
+            // Em segundo plano a música continua tocando; parada, solta o áudio.
+            guard visible else { return }
+            if phase == .background && !engine.isPlaying { engine.deactivate() }
+            if phase == .active { engine.activate() }
+        }
     }
 
     @ViewBuilder private var content: some View {

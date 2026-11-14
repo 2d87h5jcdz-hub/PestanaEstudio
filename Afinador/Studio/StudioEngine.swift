@@ -678,8 +678,7 @@ final class StudioEngine: ObservableObject {
         let session = AVAudioSession.sharedInstance()
         if previousIOBuffer == nil { previousIOBuffer = session.preferredIOBufferDuration }
         do {
-            try session.setCategory(.playAndRecord, mode: .default,
-                                    options: [.defaultToSpeaker, .allowBluetoothA2DP])
+            try session.setCategory(.playAndRecord, mode: .default, options: AudioSession.options)
             try session.setPreferredIOBufferDuration(0.005)
             try session.setActive(true)
             applyPreferredInput()

@@ -37,6 +37,8 @@ targets:
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
         UIUserInterfaceStyle: Dark
         UIFileSharingEnabled: true
+        # Continua gravando/tocando (Estúdio, Treino, Loop, metrônomo) com outro app na frente.
+        UIBackgroundModes: [audio]
         LSSupportsOpeningDocumentsInPlace: true
     settings:
       base:
