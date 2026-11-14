@@ -93,7 +93,7 @@ final class LooperEngine: ObservableObject {
     private let clipFlag = LoopClipFlag()
     @Published private(set) var hardwareGainSettable = false
     @Published var hardwareGain: Float = 0.5 {
-        didSet { if !syncingHardwareGain { HardwareInputGain.set(hardwareGain) } }
+        didSet { if !syncingHardwareGain { session.setInputGain(hardwareGain) } }
     }
     private var syncingHardwareGain = false
 
@@ -125,11 +125,10 @@ final class LooperEngine: ObservableObject {
         static let volumes = "loop.volumes"
         static let multipliers = "loop.multipliers"
         static let auto = "loop.auto"
-        static let preferredInputType = "studio.preferredInputType"   // mesma escolha do Estúdio
     }
 
     private var engine: AVAudioEngine?
-    private let effectChain = StudioEffectChain(liveNoise: true)
+    private let effectChain = EffectChain(liveNoise: true)
     private let looperNode: AVAudioUnitEffect
     private var looper: PestanaLooperAU? { looperNode.auAudioUnit as? PestanaLooperAU }
     private var boost: AVAudioUnitEQ?
@@ -140,7 +139,10 @@ final class LooperEngine: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     private var engineConfigCancellable: AnyCancellable?
 
-    init() {
+    private let session: AudioSessionManaging
+
+    init(session: AudioSessionManaging = AudioSessionService.shared) {
+        self.session = session
         let d = UserDefaults.standard
         let savedCount = d.integer(forKey: Keys.trackCount)
         trackCount = savedCount > 0 ? min(Self.maxTracks, savedCount) : 4
@@ -224,8 +226,7 @@ final class LooperEngine: ObservableObject {
 
     func start() {
         wantsRunning = true
-        let session = AVAudioSession.sharedInstance()
-        switch session.recordPermission {
+        switch AVAudioSession.sharedInstance().recordPermission {
         case .granted:
             startEngine()
         case .denied:
@@ -346,12 +347,8 @@ final class LooperEngine: ObservableObject {
     // MARK: - Sessão de áudio
 
     private func configureSession() {
-        let session = AVAudioSession.sharedInstance()
-        if previousIOBuffer == nil { previousIOBuffer = session.preferredIOBufferDuration }
         do {
-            try session.setCategory(.playAndRecord, mode: .default, options: AudioSession.options)
-            try session.setPreferredIOBufferDuration(0.005)
-            try session.setActive(true)
+            try session.configureLowLatency(previousBuffer: &previousIOBuffer)
             applyPreferredInput()
         } catch {
             lastError = "Não foi possível configurar o áudio do aparelho."
@@ -359,22 +356,12 @@ final class LooperEngine: ObservableObject {
     }
 
     private func restoreIOBuffer() {
-        guard let previous = previousIOBuffer else { return }
-        previousIOBuffer = nil
-        try? AVAudioSession.sharedInstance().setPreferredIOBufferDuration(previous > 0 ? previous : 0.023)
+        session.restoreIOBuffer(&previousIOBuffer)
     }
 
-    /// Mesma regra do Estúdio: a escolha salva; senão interface USB; senão o microfone do iPhone
-    /// (com fone plugado, o iOS trocaria para o microfone do fone).
+    /// Mesma regra do Estúdio (AudioSessionService). Aqui a falha é ignorada, como sempre foi.
     private func applyPreferredInput() {
-        let session = AVAudioSession.sharedInstance()
-        let inputs = session.availableInputs ?? []
-        let saved = UserDefaults.standard.string(forKey: Keys.preferredInputType)
-        let target = inputs.first { $0.portType.rawValue == saved }
-            ?? inputs.first { $0.portType == .usbAudio }
-            ?? inputs.first { $0.portType == .builtInMic }
-        guard let target, session.currentRoute.inputs.first?.uid != target.uid else { return }
-        try? session.setPreferredInput(target)
+        try? session.applyPreferredInput()
     }
 
     private func observeSession() {
@@ -408,30 +395,24 @@ final class LooperEngine: ObservableObject {
     }
 
     private func updateRouteInfo() {
-        let route = AVAudioSession.sharedInstance().currentRoute
-        let safe: Set<AVAudioSession.Port> = [.headphones, .bluetoothA2DP, .bluetoothLE, .bluetoothHFP, .usbAudio, .lineOut]
-        isHeadphoneConnected = route.outputs.contains { safe.contains($0.portType) }
-        hardwareGainSettable = HardwareInputGain.isSettable
+        isHeadphoneConnected = session.isHeadphoneConnected
+        hardwareGainSettable = session.isInputGainSettable
         if hardwareGainSettable {
             syncingHardwareGain = true
-            hardwareGain = HardwareInputGain.value
+            hardwareGain = session.inputGain
             syncingHardwareGain = false
         }
-        if let input = route.inputs.first {
-            switch input.portType {
-            case .builtInMic: inputName = "Microfone do iPhone"
-            case .headsetMic: inputName = "Microfone do fone"
-            default: inputName = input.portName
-            }
+        if let input = session.currentInput {
+            // O Loop sempre mostrou o nome do microfone Bluetooth sem "(Bluetooth)".
+            inputName = session.inputTitle(input, markBluetooth: false)
         } else {
             inputName = "Sem entrada"
         }
     }
 
     private func updateLatency() {
-        let s = AVAudioSession.sharedInstance()
-        let rate = engine?.outputNode.outputFormat(forBus: 0).sampleRate ?? s.sampleRate
-        let roundTrip = s.inputLatency + s.outputLatency + 2 * s.ioBufferDuration
+        let rate = engine?.outputNode.outputFormat(forBus: 0).sampleRate ?? session.sampleRate
+        let roundTrip = session.roundTripLatency
         // A redução de ruído ao vivo atrasa a entrada (≈ 10,7 ms): entra na compensação.
         let noise = Double(effectChain.noiseLatencySamples) / (rate > 0 ? rate : 48000)
         let total = max(0, roundTrip + noise + latencyTrimMS / 1000)

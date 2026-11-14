@@ -64,7 +64,7 @@ enum StudioOfflineRenderer {
         }
 
         let master = AVAudioMixerNode()
-        let limiter = StudioAudioUnits.makeLimiter()
+        let limiter = AppleAudioUnits.makeLimiter()
         engine.attach(master)
         engine.attach(limiter)
         engine.connect(master, to: limiter, format: renderFormat)

@@ -4,7 +4,7 @@ import Foundation
 //
 // Fluxo: importar música (Arquivos) → tocar com tom/velocidade/loop → (opcional) separar com IA
 // em stems → mixer (mudo/solo/volume) → "Usar como base no Estúdio" (cria projeto com os stems
-// que ficaram ligados, via StudioEngine.newProject + importAudio).
+// que ficaram ligados, via o protocolo StudioImporting, em Core/Contracts).
 
 /// Instrumentos que um separador pode devolver.
 enum StemKind: String, Codable, CaseIterable, Identifiable {

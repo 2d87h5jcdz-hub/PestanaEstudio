@@ -4,7 +4,7 @@ import UniformTypeIdentifiers
 // MARK: - Folha de efeitos (faixa ou monitoramento)
 // Ordem no motor: noise gate → EQ → compressor → guitarra (drive + amp + modulação) → delay → reverb.
 
-struct StudioEffectsSheet: View {
+struct EffectsSheet: View {
     let title: String
     let subtitle: String
     @Binding var settings: EffectSettings
@@ -14,7 +14,7 @@ struct StudioEffectsSheet: View {
     var noiseLearning: Bool? = nil
     var onLearnNoise: (() -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
-    @State private var ampNames: [String] = StudioAmps.list()
+    @State private var ampNames: [String] = AmpLibrary.list()
     @State private var showAmpImporter = false
     @State private var ampMessage: String?
 
@@ -108,14 +108,14 @@ struct StudioEffectsSheet: View {
     // MARK: Seções
 
     private var noiseSection: some View {
-        StudioEffectSection(title: "Redução de ruído", systemImage: "wind") {
+        EffectSection(title: "Redução de ruído", systemImage: "wind") {
             Toggle(isOn: Binding(get: { settings.noiseEnabled },
                                  set: { on in var s = settings; s.noiseEnabled = on; settings = s })) {
                 Text("Tirar o ruído do ambiente")
                     .font(.system(size: 14))
             }
             .tint(Color.brass)
-            StudioEffectSlider(label: "Intensidade", value: plainBinding(\.noiseAmount),
+            EffectSlider(label: "Intensidade", value: plainBinding(\.noiseAmount),
                                range: 0...1, text: percentText(settings.noiseAmount))
             noiseHelp
         }
@@ -157,10 +157,10 @@ struct StudioEffectsSheet: View {
     }
 
     private var gateSection: some View {
-        StudioEffectSection(title: "Noise gate", systemImage: "waveform.badge.minus") {
+        EffectSection(title: "Noise gate", systemImage: "waveform.badge.minus") {
             Toggle("Ligado", isOn: boolBinding(\.gateEnabled))
                 .tint(Color.brass)
-            StudioEffectSlider(label: "Limiar", value: floatBinding(\.gateThresholdDB),
+            EffectSlider(label: "Limiar", value: floatBinding(\.gateThresholdDB),
                                range: -80 ... -20, text: dbText(settings.gateThresholdDB))
                 .disabled(!settings.gateEnabled)
                 .opacity(settings.gateEnabled ? 1 : 0.45)
@@ -168,16 +168,16 @@ struct StudioEffectsSheet: View {
     }
 
     private var eqSection: some View {
-        StudioEffectSection(title: "Equalizador", systemImage: "slider.vertical.3") {
-            StudioEffectSlider(label: "Graves · 100 Hz", value: floatBinding(\.eqLowDB),
+        EffectSection(title: "Equalizador", systemImage: "slider.vertical.3") {
+            EffectSlider(label: "Graves · 100 Hz", value: floatBinding(\.eqLowDB),
                                range: -12...12, text: signedDbText(settings.eqLowDB))
-            StudioEffectSlider(label: "Médios · 1 kHz", value: floatBinding(\.eqMidDB),
+            EffectSlider(label: "Médios · 1 kHz", value: floatBinding(\.eqMidDB),
                                range: -12...12, text: signedDbText(settings.eqMidDB))
-            StudioEffectSlider(label: "Agudos · 8 kHz", value: floatBinding(\.eqHighDB),
+            EffectSlider(label: "Agudos · 8 kHz", value: floatBinding(\.eqHighDB),
                                range: -12...12, text: signedDbText(settings.eqHighDB))
-            StudioEffectSlider(label: "Tirar embolado · 300 Hz", value: floatBinding(\.eqMuddyDB),
+            EffectSlider(label: "Tirar embolado · 300 Hz", value: floatBinding(\.eqMuddyDB),
                                range: -12...0, text: signedDbText(settings.eqMuddyDB))
-            StudioEffectSlider(label: "Presença · 4 kHz", value: floatBinding(\.eqPresenceDB),
+            EffectSlider(label: "Presença · 4 kHz", value: floatBinding(\.eqPresenceDB),
                                range: -6...8, text: signedDbText(settings.eqPresenceDB))
             Toggle("Cortar graves abaixo de 80 Hz", isOn: boolBinding(\.eqLowCut))
                 .tint(Color.brass)
@@ -189,10 +189,10 @@ struct StudioEffectsSheet: View {
     }
 
     private var compressorSection: some View {
-        StudioEffectSection(title: "Compressor", systemImage: "arrow.down.right.and.arrow.up.left") {
+        EffectSection(title: "Compressor", systemImage: "arrow.down.right.and.arrow.up.left") {
             Toggle("Ligado", isOn: boolBinding(\.compressorEnabled))
                 .tint(Color.brass)
-            StudioEffectSlider(label: "Quantidade", value: floatBinding(\.compressorAmount),
+            EffectSlider(label: "Quantidade", value: floatBinding(\.compressorAmount),
                                range: 0...1, text: percentText(settings.compressorAmount))
                 .disabled(!settings.compressorEnabled)
                 .opacity(settings.compressorEnabled ? 1 : 0.45)
@@ -200,8 +200,8 @@ struct StudioEffectsSheet: View {
     }
 
     private var driveSection: some View {
-        StudioEffectSection(title: "Drive", systemImage: "bolt.fill") {
-            StudioEffectSlider(label: "Distorção (0 = desligado)", value: floatBinding(\.driveAmount),
+        EffectSection(title: "Drive", systemImage: "bolt.fill") {
+            EffectSlider(label: "Distorção (0 = desligado)", value: floatBinding(\.driveAmount),
                                range: 0...1, text: percentText(settings.driveAmount))
             menuRow(title: "Estilo", value: settings.driveStyle.title) {
                 Picker("Estilo", selection: valueBinding(\.driveStyle)) {
@@ -217,11 +217,11 @@ struct StudioEffectsSheet: View {
 
     private var ampTitle: String {
         guard let name = settings.ampModel else { return "Nenhum" }
-        return StudioAmps.displayName(name)
+        return AmpLibrary.displayName(name)
     }
 
     private var ampSection: some View {
-        StudioEffectSection(title: "Amplificador (IA)", systemImage: "hifispeaker.fill") {
+        EffectSection(title: "Amplificador (IA)", systemImage: "hifispeaker.fill") {
             Text("Modelos .nam do Neural Amp Modeler imitam amplificadores e pedais reais. Baixe grátis em tone3000.com e importe aqui. Use com o drive desligado.")
                 .font(.system(size: 12))
                 .foregroundColor(.muted)
@@ -234,7 +234,7 @@ struct StudioEffectsSheet: View {
                 Menu {
                     Button("Nenhum") { setAmp(nil) }
                     ForEach(ampNames, id: \.self) { name in
-                        Button(StudioAmps.displayName(name)) { setAmp(name) }
+                        Button(AmpLibrary.displayName(name)) { setAmp(name) }
                     }
                     Divider()
                     Button {
@@ -254,9 +254,9 @@ struct StudioEffectsSheet: View {
                 }
             }
             if settings.ampModel != nil {
-                StudioEffectSlider(label: "Entrada (ganho no amp)", value: plainBinding(\.ampInputDB),
+                EffectSlider(label: "Entrada (ganho no amp)", value: plainBinding(\.ampInputDB),
                                    range: -12...12, text: signedDbText(settings.ampInputDB))
-                StudioEffectSlider(label: "Saída (volume)", value: plainBinding(\.ampOutputDB),
+                EffectSlider(label: "Saída (volume)", value: plainBinding(\.ampOutputDB),
                                    range: -12...12, text: signedDbText(settings.ampOutputDB))
             }
             if let message = ampMessage {
@@ -282,10 +282,10 @@ struct StudioEffectsSheet: View {
         case .success(let urls):
             guard let url = urls.first else { return }
             do {
-                let name = try StudioAmps.importModel(from: url)
-                ampNames = StudioAmps.list()
+                let name = try AmpLibrary.importModel(from: url)
+                ampNames = AmpLibrary.list()
                 setAmp(name)
-                ampMessage = "✓ \(StudioAmps.displayName(name)) importado."
+                ampMessage = "✓ \(AmpLibrary.displayName(name)) importado."
             } catch {
                 ampMessage = error.localizedDescription
             }
@@ -295,7 +295,7 @@ struct StudioEffectsSheet: View {
     // MARK: Modulação
 
     private var modulationSection: some View {
-        StudioEffectSection(title: "Modulação", systemImage: "waveform.path") {
+        EffectSection(title: "Modulação", systemImage: "waveform.path") {
             menuRow(title: "Tipo", value: settings.modType.title) {
                 Picker("Tipo", selection: valueBinding(\.modType)) {
                     ForEach(ModulationType.allCases) { type in
@@ -304,11 +304,11 @@ struct StudioEffectsSheet: View {
                 }
             }
             if settings.modType != .none {
-                StudioEffectSlider(label: "Velocidade", value: floatBinding(\.modRate),
+                EffectSlider(label: "Velocidade", value: floatBinding(\.modRate),
                                    range: 0.05...8, text: String(format: "%.2f Hz", settings.modRate))
-                StudioEffectSlider(label: "Profundidade", value: floatBinding(\.modDepth),
+                EffectSlider(label: "Profundidade", value: floatBinding(\.modDepth),
                                    range: 0...1, text: percentText(settings.modDepth))
-                StudioEffectSlider(label: "Mix", value: floatBinding(\.modMix),
+                EffectSlider(label: "Mix", value: floatBinding(\.modMix),
                                    range: 0...1, text: percentText(settings.modMix))
             }
         }
@@ -336,19 +336,19 @@ struct StudioEffectsSheet: View {
     }
 
     private var delaySection: some View {
-        StudioEffectSection(title: "Delay", systemImage: "repeat") {
-            StudioEffectSlider(label: "Mix", value: floatBinding(\.delayMix),
+        EffectSection(title: "Delay", systemImage: "repeat") {
+            EffectSlider(label: "Mix", value: floatBinding(\.delayMix),
                                range: 0...1, text: percentText(settings.delayMix))
-            StudioEffectSlider(label: "Tempo", value: floatBinding(\.delayTime),
+            EffectSlider(label: "Tempo", value: floatBinding(\.delayTime),
                                range: 0.05...1.0, text: msText(settings.delayTime))
-            StudioEffectSlider(label: "Repetições", value: floatBinding(\.delayFeedback),
+            EffectSlider(label: "Repetições", value: floatBinding(\.delayFeedback),
                                range: 0...0.9, text: percentText(settings.delayFeedback))
         }
     }
 
     private var reverbSection: some View {
-        StudioEffectSection(title: "Reverb", systemImage: "building.columns") {
-            StudioEffectSlider(label: "Mix", value: floatBinding(\.reverbMix),
+        EffectSection(title: "Reverb", systemImage: "building.columns") {
+            EffectSlider(label: "Mix", value: floatBinding(\.reverbMix),
                                range: 0...1, text: percentText(settings.reverbMix))
         }
     }
@@ -431,7 +431,7 @@ struct StudioEffectsSheet: View {
 
 // MARK: - Peças da folha
 
-struct StudioEffectSection<Content: View>: View {
+struct EffectSection<Content: View>: View {
     let title: String
     let systemImage: String
     @ViewBuilder let content: () -> Content
@@ -448,7 +448,7 @@ struct StudioEffectSection<Content: View>: View {
     }
 }
 
-struct StudioEffectSlider: View {
+struct EffectSlider: View {
     let label: String
     let value: Binding<Float>
     let range: ClosedRange<Float>

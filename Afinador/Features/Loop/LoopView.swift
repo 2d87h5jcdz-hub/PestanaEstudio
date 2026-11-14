@@ -41,7 +41,7 @@ struct LoopView: View {
         .onAppear { looper.start() }
         .onDisappear { looper.stop() }
         .sheet(isPresented: $showEffects) {
-            StudioEffectsSheet(title: "Efeitos do Loop",
+            EffectsSheet(title: "Efeitos do Loop",
                                subtitle: "Valem para o que você toca e para o que é gravado nas faixas.",
                                settings: $looper.effects,
                                noiseLearning: looper.learningNoise,

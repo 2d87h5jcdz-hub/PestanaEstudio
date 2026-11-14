@@ -38,7 +38,10 @@ final class Metronome: ObservableObject {
         Signature(label: "4/4", beats: 4), Signature(label: "6/8", beats: 6),
     ]
 
-    init() {
+    private let session: AudioSessionManaging
+
+    init(session: AudioSessionManaging = AudioSessionService.shared) {
+        self.session = session
         let d = UserDefaults.standard
         let savedBpm = d.double(forKey: "bpm")
         bpm = savedBpm >= 30 ? savedBpm : 90
@@ -114,7 +117,7 @@ final class Metronome: ObservableObject {
     }
 
     func start() {
-        AudioSession.activate()
+        session.activate()
         setup()
         syncParams()
         lock.lock()

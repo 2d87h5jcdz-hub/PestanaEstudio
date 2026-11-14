@@ -5,7 +5,7 @@ import Foundation
 // Ficam em Documentos/Amps (visível no app Arquivos). O usuário baixa capturas gratuitas
 // (ex.: tone3000.com) e importa; o app confere se o arquivo abre antes de copiar.
 
-enum StudioAmps {
+enum AmpLibrary {
     static var folder: URL {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let url = docs.appendingPathComponent("Amps", isDirectory: true)

@@ -26,16 +26,4 @@ func rawPeak(of buffer: AVAudioPCMBuffer) -> Float {
     return peak
 }
 
-enum AudioSession {
-    /// Opções da sessão em todo o app. `mixWithOthers`: um app de cifra (ou vídeo) tocando som
-    /// não interrompe a gravação nem o Treino/Loop em segundo plano.
-    static let options: AVAudioSession.CategoryOptions = [.defaultToSpeaker, .allowBluetoothA2DP, .mixWithOthers]
-
-    static func activate() {
-        let s = AVAudioSession.sharedInstance()
-        if s.category != .playAndRecord || s.categoryOptions != options {
-            try? s.setCategory(.playAndRecord, mode: .default, options: options)
-        }
-        try? s.setActive(true)
-    }
-}
+// A configuração da sessão (o antigo `enum AudioSession`) está em AudioSessionService.swift.

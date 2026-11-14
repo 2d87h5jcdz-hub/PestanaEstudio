@@ -118,6 +118,11 @@ final class ChordPlayer {
     }
 
     private let engine = AVAudioEngine()
+    private let session: AudioSessionManaging
+
+    init(session: AudioSessionManaging = AudioSessionService.shared) {
+        self.session = session
+    }
     private var node: AVAudioSourceNode?
     private var voices: [Voice] = []
     private let lock = NSLock()
@@ -161,7 +166,7 @@ final class ChordPlayer {
     }
 
     func play(midis: [Int], a4: Double) {
-        AudioSession.activate()
+        session.activate()
         setup()
         if !engine.isRunning { try? engine.start() }
         var newVoices: [Voice] = []

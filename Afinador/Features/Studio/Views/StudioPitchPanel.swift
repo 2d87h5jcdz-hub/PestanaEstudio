@@ -41,7 +41,7 @@ struct StudioPitchPanel: View {
     }
 
     private var pitchSection: some View {
-        StudioEffectSection(title: "Afinação automática", systemImage: "tuningfork") {
+        EffectSection(title: "Afinação automática", systemImage: "tuningfork") {
             Toggle(isOn: binding(\.enabled)) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Corrigir afinação da voz")
@@ -58,7 +58,7 @@ struct StudioPitchPanel: View {
                 if !pitch.isAuto {
                     scalePicker
                 }
-                StudioEffectSlider(label: "Intensidade", value: binding(\.strength), range: 0.3...1,
+                EffectSlider(label: "Intensidade", value: binding(\.strength), range: 0.3...1,
                                    text: "\(Int((pitch.strength * 100).rounded()))%")
                 Text("Mais baixo soa mais natural; 100% leva a nota exatamente para o lugar.")
                     .font(.system(size: 11))

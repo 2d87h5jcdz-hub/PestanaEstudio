@@ -107,7 +107,7 @@ struct StudioProjectView: View {
     private func effectsSheet(for target: StudioEffectsTarget) -> some View {
         switch target {
         case .monitor:
-            StudioEffectsSheet(
+            EffectsSheet(
                 title: "Efeitos ao vivo",
                 subtitle: "O que você ouve no fone e o que vai para a próxima gravação.",
                 settings: $studio.monitorEffects,
@@ -115,7 +115,7 @@ struct StudioProjectView: View {
                 onLearnNoise: { studio.learnMonitorNoise() }
             )
         case .track(let id):
-            StudioEffectsSheet(
+            EffectsSheet(
                 title: trackName(id),
                 subtitle: "Efeitos desta faixa na reprodução e na exportação.",
                 settings: trackEffectsBinding(id),

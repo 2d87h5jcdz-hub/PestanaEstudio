@@ -91,7 +91,10 @@ final class PracticeEngine: ObservableObject {
     private var observers: [NSObjectProtocol] = []
     private var isActive = false
 
-    init() {
+    private let session: AudioSessionManaging
+
+    init(session: AudioSessionManaging = AudioSessionService.shared) {
+        self.session = session
         let sep = DemucsSeparator()
         separator = sep
         separatorAvailable = sep.isAvailable
@@ -109,12 +112,8 @@ final class PracticeEngine: ObservableObject {
 
     func activate() {
         isActive = true
-        let s = AVAudioSession.sharedInstance()
         do {
-            if s.category != .playAndRecord || s.categoryOptions != AudioSession.options {
-                try s.setCategory(.playAndRecord, mode: .default, options: AudioSession.options)
-            }
-            try s.setActive(true)
+            try session.activateOrThrow()
         } catch {
             lastError = "Não consegui abrir o áudio: \(error.localizedDescription)"
         }

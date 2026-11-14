@@ -36,67 +36,10 @@ enum StudioEngineError: LocalizedError, Equatable {
     }
 }
 
-// MARK: - Persistência em Documents/Projects/<id>/
+// MARK: - Persistência
+// Pastas e project.json: Core/Storage/ProjectStore.swift (DiskProjectStore).
 
-enum StudioStorage {
-    static var projectsRoot: URL {
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        return docs.appendingPathComponent("Projects", isDirectory: true)
-    }
-
-    static func folder(for id: UUID) -> URL {
-        projectsRoot.appendingPathComponent(id.uuidString, isDirectory: true)
-    }
-
-    static func manifestURL(for id: UUID) -> URL {
-        folder(for: id).appendingPathComponent("project.json")
-    }
-
-    static func makeEncoder() -> JSONEncoder {
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        return encoder
-    }
-
-    static func makeDecoder() -> JSONDecoder {
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        return decoder
-    }
-
-    /// Lê todos os projetos salvos, mais recente primeiro. Pastas sem project.json válido são ignoradas.
-    static func loadAll() -> [StudioProject] {
-        let fm = FileManager.default
-        let root = projectsRoot
-        try? fm.createDirectory(at: root, withIntermediateDirectories: true)
-        guard let dirs = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil,
-                                                       options: [.skipsHiddenFiles]) else { return [] }
-        let decoder = makeDecoder()
-        var result: [StudioProject] = []
-        for dir in dirs {
-            let manifest = dir.appendingPathComponent("project.json")
-            guard let data = try? Data(contentsOf: manifest),
-                  let project = try? decoder.decode(StudioProject.self, from: data) else { continue }
-            result.append(project)
-        }
-        return result.sorted { $0.updatedAt > $1.updatedAt }
-    }
-
-    static func write(_ project: StudioProject) throws {
-        let dir = folder(for: project.id)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let data = try makeEncoder().encode(project)
-        try data.write(to: manifestURL(for: project.id), options: .atomic)
-    }
-
-    static func sanitizedFileName(_ name: String) -> String {
-        let invalid = CharacterSet(charactersIn: "/\\:?%*|\"<>")
-        let cleaned = name.components(separatedBy: invalid).joined(separator: "-")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return cleaned.isEmpty ? "Mixagem" : cleaned
-    }
-}
+extension StudioProject: StoredProject {}
 
 // MARK: - Relógio de host (mach_absolute_time) usado para sincronizar players, clique e gravação
 

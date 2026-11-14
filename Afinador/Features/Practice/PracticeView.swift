@@ -4,7 +4,8 @@ import UniformTypeIdentifiers
 // MARK: - Aba Treino
 
 struct PracticeView: View {
-    @ObservedObject var studio: StudioEngine
+    /// O Estúdio, visto só pelo que o Treino usa (injetado pelo App).
+    let studio: StudioImporting
     var openStudio: () -> Void
 
     @StateObject private var engine = PracticeEngine()
@@ -74,10 +75,10 @@ struct PracticeView: View {
         let items = engine.filesForStudio()
         sendingToStudio = true
         Task {
-            _ = studio.newProject(name: song.title)
+            studio.createProject(named: song.title)
             do {
                 for item in items {
-                    _ = try await studio.importAudio(from: item.url, name: item.name)
+                    try await studio.importTrack(from: item.url, name: item.name)
                 }
                 sendingToStudio = false
                 openStudio()

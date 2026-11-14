@@ -21,12 +21,15 @@ Afinador/
     Practice/           Treino (player, separação Demucs)
     Loop/               LoopView, LooperEngine
   Core/
-    Audio/              sessão de áudio (AudioSessionService), cadeia de efeitos, medidores
+    Audio/              sessão de áudio (AudioSessionService), utilidades de entrada
+      Effects/          EffectSettings (Codable), EffectChain, AmpLibrary (.nam), AppleAudioUnits
     AudioUnits/         wrappers Objective-C++ finos (PestanaGuitarAU, PestanaLooperAU, PestanaNoiseAU)
+    Contracts/          protocolos entre Features (StudioImporting)
     DSP/                C++20 puro: GuitarFXCore, LooperCore, NoiseReducer (sem APIs da Apple)
-    Storage/            ProjectStore (protocolo) e implementação em disco
+    Storage/            ProjectStore (protocolo genérico) e DiskProjectStore
   Shared/
-    UI/                 cores, componentes reutilizáveis (LevelBar, seções, sliders)
+    UI/                 cores, componentes reutilizáveis (LevelBar, Panel/StudioChip, StatusBarCover)
+      Effects/          EffectsSheet (folha de efeitos) + EffectSection/EffectSlider
   Models/               modelo Core ML baixado no CI (não mexer no caminho)
 tests/                  testes C++ (CMake + CTest), rodam no CI Linux a cada push
 ```
@@ -39,6 +42,24 @@ tests/                  testes C++ (CMake + CTest), rodam no CI Linux a cada pus
    implementação é injetada pelo App (inversão de dependência).
 3. **Core/DSP** é C++20 puro: nada de `<AVFoundation>`, Objective-C ou Swift. Tudo nele tem teste em `tests/`.
 4. **Core/AudioUnits** só traduz chamadas (Swift ↔ C++) e o render; nenhuma regra de negócio ali.
+
+### Decisões da etapa 4 (registradas)
+
+- **AudioSessionService** não é `@MainActor` e não guarda estado: o Afinador, o Metrônomo e os
+  Acordes chamam fora do MainActor, e o buffer de I/O anterior fica com cada motor (`inout`), como
+  antes (cada um restaura o seu). A entrada preferida continua salva em `studio.preferredInputType`.
+- **ProjectStore** é genérico no tipo do projeto (`StoredProject: Codable` com `id`/`updatedAt`): Core
+  não conhece `StudioProject` (regra 1). O Estúdio declara `extension StudioProject: StoredProject {}`.
+- **StudioImporting** é `@MainActor` e restrito a `AnyObject`; o Treino não observa nada publicado do
+  Estúdio, então guarda só o protocolo (o App injeta o StudioEngine).
+- **StudioEngine** foi dividido em extensões por responsabilidade (`StudioEngine+*.swift`) e uma
+  classe de serviço (`StudioPitchJobs`, trabalhos de afinação/ruído). O roteamento de entrada, ganho
+  e monitoramento ficou como extensão (`+Session`, `+Graph`), não classe: ele escreve vários campos
+  publicados que as telas observam no próprio motor, e separar exigiria reespelhar tudo.
+  Consequência: o estado interno e os setters publicados do StudioEngine passaram de `private` para
+  `internal(set)`/interno (Swift não tem "privado ao tipo" entre arquivos). Regra: só o motor escreve.
+- Componentes visuais de uso geral mantiveram o nome antigo quando muito usados (`StudioChip`,
+  `studioPanel`), para não espalhar renomes; mudaram de pasta para Shared/UI.
 
 ## 3. MVVM
 

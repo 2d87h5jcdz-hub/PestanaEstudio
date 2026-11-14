@@ -77,7 +77,10 @@ final class TunerEngine: ObservableObject {
     private var toneGain: Double = 0
     private let toneLock = NSLock()
 
-    init() {
+    private let session: AudioSessionManaging
+
+    init(session: AudioSessionManaging = AudioSessionService.shared) {
+        self.session = session
         let d = UserDefaults.standard
         let saved = d.string(forKey: "tuning")
         tuning = Tuning.all.first { $0.name == saved } ?? Tuning.all[0]
@@ -102,8 +105,7 @@ final class TunerEngine: ObservableObject {
 
     func start() {
         wantsRunning = true
-        let session = AVAudioSession.sharedInstance()
-        session.requestRecordPermission { granted in
+        AVAudioSession.sharedInstance().requestRecordPermission { granted in
             DispatchQueue.main.async {
                 guard self.wantsRunning else { return }
                 if granted { self.startEngine() } else { self.permissionDenied = true }
@@ -114,7 +116,7 @@ final class TunerEngine: ObservableObject {
     private func startEngine() {
         guard !engine.isRunning else { return }
         do {
-            AudioSession.activate()
+            session.activate()
 
             // Motor novo a cada início: o Estúdio pode ter trocado a entrada, a taxa de amostragem
             // ou o buffer. Um AVAudioEngine antigo guarda o formato velho da entrada e o tap com

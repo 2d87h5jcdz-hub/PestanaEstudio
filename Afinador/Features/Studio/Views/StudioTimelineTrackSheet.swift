@@ -43,7 +43,7 @@ struct StudioTimelineTrackSheet: View {
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
         .sheet(isPresented: $showEffects) {
-            StudioEffectsSheet(
+            EffectsSheet(
                 title: track?.name ?? "Faixa",
                 subtitle: "Efeitos desta faixa na reprodução e na exportação.",
                 settings: effectsBinding,
