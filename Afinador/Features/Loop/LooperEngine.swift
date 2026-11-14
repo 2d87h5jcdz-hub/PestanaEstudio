@@ -53,6 +53,8 @@ final class LooperEngine: ObservableObject {
     @Published private(set) var running = false
     @Published private(set) var isHeadphoneConnected = false
     @Published private(set) var inputName = ""
+    @Published private(set) var availableInputs: [AudioInputOption] = []
+    @Published private(set) var selectedInputID: String?
     @Published private(set) var latencyMS: Double = 0
     @Published var permissionDenied = false
     @Published var lastError: String?
@@ -394,7 +396,26 @@ final class LooperEngine: ObservableObject {
         }
     }
 
+    /// Troca a entrada (com os loops parados). A escolha fica salva e vale também no Estúdio.
+    func selectInput(_ id: String) {
+        guard !playing else { return }
+        do {
+            let found: Bool = try session.selectInput(uid: id)
+            if !found { return }
+        } catch let error as AudioInputSelectionError {
+            lastError = "Não foi possível usar \(error.inputTitle) como entrada."
+        } catch {}
+        updateRouteInfo()
+        updateLatency()
+    }
+
     private func updateRouteInfo() {
+        let audio: AudioSessionManaging = session
+        availableInputs = audio.availableInputs.map { (port: AVAudioSessionPortDescription) -> AudioInputOption in
+            AudioInputOption(id: port.uid, name: audio.inputTitle(port, markBluetooth: true),
+                             portType: port.portType.rawValue)
+        }
+        selectedInputID = audio.currentInput?.uid
         isHeadphoneConnected = session.isHeadphoneConnected
         hardwareGainSettable = session.isInputGainSettable
         if hardwareGainSettable {

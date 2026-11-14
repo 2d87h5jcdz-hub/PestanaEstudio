@@ -82,7 +82,7 @@ final class StudioEngine: ObservableObject {
     @Published internal(set) var inputName: String = "Microfone do iPhone"
     @Published internal(set) var isHeadphoneConnected: Bool = false
     /// Entradas disponíveis agora (microfone do iPhone, microfone do fone, interface USB…).
-    @Published internal(set) var availableInputs: [StudioInputOption] = []
+    @Published internal(set) var availableInputs: [AudioInputOption] = []
     /// uid da entrada em uso.
     @Published internal(set) var selectedInputID: String?
     /// Ganho digital da entrada, em dB (0…+24). Vale para o monitoramento, o medidor e a gravação.

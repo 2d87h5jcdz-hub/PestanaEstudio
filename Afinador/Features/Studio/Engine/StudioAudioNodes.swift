@@ -513,9 +513,3 @@ final class StudioInputGain: @unchecked Sendable {
     }
 }
 
-/// Uma entrada de áudio que o usuário pode escolher no Estúdio.
-struct StudioInputOption: Identifiable, Equatable {
-    let id: String        // uid da porta
-    let name: String      // "Microfone do iPhone", "Microfone do fone", "iRig HD"…
-    let portType: String  // AVAudioSession.Port.rawValue
-}

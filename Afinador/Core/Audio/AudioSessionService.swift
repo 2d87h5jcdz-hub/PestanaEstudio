@@ -164,3 +164,10 @@ final class AudioSessionService: AudioSessionManaging, @unchecked Sendable {
     var inputGain: Float { HardwareInputGain.value }
     func setInputGain(_ value: Float) { HardwareInputGain.set(value) }
 }
+
+/// Uma entrada de áudio que o usuário pode escolher (Estúdio e Loop).
+struct AudioInputOption: Identifiable, Equatable {
+    let id: String        // uid da porta
+    let name: String      // "Microfone do iPhone", "Microfone do fone", "iRig HD"…
+    let portType: String  // AVAudioSession.Port.rawValue
+}

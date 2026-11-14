@@ -158,15 +158,43 @@ struct LoopView: View {
 
     // MARK: Entrada e efeitos
 
+    /// Escolha da entrada (a mesma do Estúdio): microfone do iPhone, do fone, USB…
+    private var inputMenu: some View {
+        Menu {
+            ForEach(looper.availableInputs) { option in
+                Button {
+                    looper.selectInput(option.id)
+                } label: {
+                    if option.id == looper.selectedInputID {
+                        Label(option.name, systemImage: "checkmark")
+                    } else {
+                        Text(option.name)
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Text(looper.inputName.isEmpty ? "Entrada" : looper.inputName)
+                    .font(.system(size: 14, weight: .semibold))
+                    .lineLimit(1)
+                if looper.availableInputs.count > 1 {
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 10, weight: .semibold))
+                }
+            }
+            .foregroundColor(.fg)
+        }
+        .disabled(looper.playing || looper.availableInputs.count < 2)
+        .accessibilityLabel("Entrada de áudio: \(looper.inputName). Toque para trocar.")
+    }
+
     private var inputCard: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
                 Image(systemName: "mic")
                     .foregroundColor(.brass)
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(looper.inputName.isEmpty ? "Entrada" : looper.inputName)
-                        .font(.system(size: 14, weight: .semibold))
-                        .lineLimit(1)
+                    inputMenu
                     LevelBar(level: looper.inputLevel)
                         .frame(height: 5)
                 }

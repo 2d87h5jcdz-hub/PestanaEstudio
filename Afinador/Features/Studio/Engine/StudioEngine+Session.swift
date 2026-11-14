@@ -133,8 +133,8 @@ extension StudioEngine {
 
     func updateRouteInfo() {
         let audio: AudioSessionManaging = session
-        availableInputs = audio.availableInputs.map { (port: AVAudioSessionPortDescription) -> StudioInputOption in
-            StudioInputOption(id: port.uid, name: audio.inputTitle(port, markBluetooth: true),
+        availableInputs = audio.availableInputs.map { (port: AVAudioSessionPortDescription) -> AudioInputOption in
+            AudioInputOption(id: port.uid, name: audio.inputTitle(port, markBluetooth: true),
                               portType: port.portType.rawValue)
         }
         let current: AVAudioSessionPortDescription? = audio.currentInput
