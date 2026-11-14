@@ -3,8 +3,19 @@
 // Relógio: G = amostras desde o início do ciclo 0 (pode ser negativo durante a contagem).
 // - A primeira gravação define o CICLO (base). As outras faixas têm 1, 2 ou 4 ciclos e ficam
 //   sempre sincronizadas por G.
-// - Cada faixa tem até três buffers estéreo: `main` (consolidado), `layer` (última camada, que dá
-//   para desfazer) e `rec` (a camada sendo gravada). A reprodução soma os três.
+// - Cada faixa tem até quatro buffers estéreo: `main` (consolidado), `old` (camada anterior
+//   esperando ser somada ao `main`), `layer` (última camada, que dá para desfazer) e `rec` (a camada
+//   sendo gravada). A reprodução soma os quatro.
+// - Junção de camadas: ao começar a gravar por cima, a `layer` vira `old` na hora (sem copiar nada).
+//   A soma main + old num `main` novo é feita FORA da thread principal: a principal pega o trabalho
+//   (takeMergeJob), uma fila de fundo soma (runMerge) e a principal entrega o resultado (commitMerge),
+//   que o áudio troca por comando. Enquanto o trabalho roda, os buffers que ele lê não são liberados
+//   (ficam adiados até o commit). Só se uma nova sobregravação começar com `old` ainda pendente a
+//   principal soma main + old na hora (caso raro).
+// - Desfazer tira a `layer`; sem `layer`, tira a `old` (se a junção ainda não aconteceu); sem as
+//   duas, apaga a faixa.
+// - Memória: toda alocação passa por um orçamento opcional (setMemoryBudget); quando estoura, a ação
+//   é recusada e lastError() = ErrMemory.
 // - Gravação = janela [startG, stopG) no tempo do músico. A entrada que chega em G foi tocada
 //   ouvindo G − L (L = latência de ida e volta), então só a entrada que chega em
 //   [startG + L, stopG + L) é gravada, na posição G − L. Depois de stopG a faixa ainda recebe
@@ -16,7 +27,9 @@
 //
 // Threads: métodos [principal] só de UMA thread; process() só da thread de áudio. Comunicação por
 // filas sem lock (comandos principal → áudio, eventos áudio → principal) e atomics. Toda memória é
-// alocada e liberada na thread principal.
+// alocada e liberada na thread principal (a exceção é runMerge, que aloca numa fila de fundo e
+// entrega à principal). Quem roda junções em segundo plano precisa manter o LooperCore vivo até o
+// commitMerge (ex.: shared_ptr capturado pelo trabalho).
 #pragma once
 #include <atomic>
 #include <cstdint>
@@ -33,6 +46,18 @@ public:
   /// Fase da base no modo automático.
   enum Phase : int { PhaseNone = 0, PhaseCountIn = 1, PhaseWaitingSound = 2 };
   enum StartMode : int { StartCountIn = 0, StartOnSound = 1 };
+  /// Por que o último press() não deu certo.
+  enum PressError : int { ErrNone = 0, ErrBusy = 1, ErrMemory = 2 };
+
+  /// Trabalho de junção (main + old) para rodar fora da thread principal.
+  struct MergeJob {
+    int track;
+    const float* main;
+    const float* old;
+    int64_t mainCapacity;
+    int64_t oldCapacity;
+    int64_t length;
+  };
 
   LooperCore();
   ~LooperCore();
@@ -63,8 +88,11 @@ public:
   /// Botão da faixa. Manual: vazia → grava; gravando → toca (fecha); tocando → sobregrava;
   /// sobregravando → toca. Automático: vazia/tocando → arma (entra no próximo ciclo e grava uma
   /// volta); armada → cancela; gravando → para já. Durante a base automática, cancela tudo.
-  /// false se não deu agora (memória, ciclo ainda não informado, cauda da gravação anterior).
+  /// false se não deu agora (memória, ciclo ainda não informado, cauda da gravação anterior);
+  /// o motivo fica em lastError().
   bool press(int track);
+  /// Motivo da última recusa de press() (ErrNone se deu certo).
+  PressError lastError() const { return mLastError; }
   void toggleMute(int track);
   void undo(int track);
   void clearTrack(int track);
@@ -73,6 +101,20 @@ public:
   void clearAll();
   /// Processa eventos da thread de áudio e libera buffers devolvidos. Chamar periodicamente.
   void collectGarbage();
+
+  // ---------- [principal] memória ----------
+  /// Limite de bytes dos buffers de áudio (0 = sem limite).
+  void setMemoryBudget(int64_t bytes) { mBudget = bytes > 0 ? bytes : 0; }
+  /// Bytes alocados agora (inclui buffers devolvidos ainda não liberados).
+  int64_t bytesInUse() const { return mBytesInUse; }
+
+  // ---------- junção de camadas em segundo plano ----------
+  /// [principal] Pega uma faixa com `old` e sem junção em andamento. false se não há nada a juntar.
+  bool takeMergeJob(MergeJob& job);
+  /// [qualquer thread] Soma main + old num buffer novo (planar, capacity = length). nullptr se faltar memória.
+  static float* runMerge(const MergeJob& job);
+  /// [principal] Entrega o resultado (ou nullptr). Se a faixa mudou nesse meio-tempo, descarta.
+  void commitMerge(const MergeJob& job, float* merged);
 
   // ---------- [principal] leitura de estado ----------
   TrackState trackState(int track) const;
@@ -107,7 +149,10 @@ private:
     CmdStartRecord,   // manual: começa já
     CmdStartBase,     // ciclo base (manual ou automático)
     CmdSchedule,      // automático: grava uma volta a partir de startG (−1 = próximo início de ciclo)
-    CmdStopRecord, CmdCancelArm, CmdSwapMain, CmdDropLayer, CmdClearTrack, CmdClearAll,
+    CmdStopRecord, CmdCancelArm,
+    CmdSwapMain,      // troca main pelo buffer do comando; main antigo e old vão para o retire
+    CmdLayerToOld,    // layer vira old (início de sobregravação)
+    CmdDropLayer, CmdDropOld, CmdClearTrack, CmdClearAll,
     CmdPlay, CmdStop, CmdMute,
   };
   struct Command {
@@ -124,7 +169,7 @@ private:
   struct Event { EventType type; int track; };
 
   struct AudioTrack {
-    Buffer main, layer, rec;
+    Buffer main, old, layer, rec;
     bool hasRec = false;        // rec ativo (armado, gravando ou cauda)
     bool started = false;       // já passou de startG
     int64_t startG = 0, stopG = kNever;
@@ -139,8 +184,24 @@ private:
     TrackState state = Empty;
     int multiplier = 1;
     bool muted = false;
-    Buffer main, layer, rec;
+    Buffer main, old, layer, rec;
   };
+
+  /// Junção em andamento numa faixa [principal].
+  struct MergeSlot {
+    bool active = false;
+    bool abandoned = false;     // prepare() rodou no meio: o resultado é descartado
+    const float* main = nullptr;
+    const float* old = nullptr;
+  };
+  MergeSlot mMerge[kMaxTracks];
+
+  /// Buffer devolvido (ponteiro + bytes contabilizados).
+  struct Retired { float* data; int64_t bytes; };
+  static int64_t bytesOf(const Buffer& b) {
+    return b.capacity * static_cast<int64_t>(kChannels) * static_cast<int64_t>(sizeof(float));
+  }
+
 
   static constexpr int kQueueSize = 256;
   Command mQueue[kQueueSize];
@@ -154,10 +215,18 @@ private:
   void handleEvent(const Event& e);       // principal
 
   static constexpr int kRetireSize = 256;
-  float* mRetire[kRetireSize] = {};
+  Retired mRetire[kRetireSize] = {};
   std::atomic<int> mRetireHead{0}, mRetireTail{0};
-  void retire(float* p);
-  void retire(const Buffer& b) { retire(b.data); }
+  void retire(const Buffer& b);   // áudio
+
+  // [principal] buffers que um trabalho de junção ainda lê: liberados depois do commit
+  static constexpr int kDeferredSize = 2 * kMaxTracks + 2;
+  Retired mDeferred[kDeferredSize] = {};
+  int mDeferredCount = 0;
+  bool protectedByMerge(const float* p) const;
+  void freeNow(const Retired& r);         // libera já ou adia se um trabalho ainda lê
+  void freeOwned(const Buffer& b) { freeNow(Retired{b.data, bytesOf(b)}); }
+  void flushDeferred();
 
   // áudio
   void applyCommand(const Command& c);
@@ -173,12 +242,16 @@ private:
   bool startRecordingMain(int t);
   bool startAutoBase(int t);
   bool scheduleMain(int t, int64_t startG);
-  bool mergeLayerMain(int t);
+  bool prepareOverdubMain(int t);   // layer → old (junta main + old antes, se preciso)
+  bool mergeOldMainSync(int t);
   void resetMain(int t);
   bool othersHaveContent(int t) const;
 
   double mSampleRate = 48000.0;
   int64_t mMaxBase = 0;
+  int64_t mBudget = 0;           // [principal] 0 = sem limite
+  int64_t mBytesInUse = 0;       // [principal]
+  PressError mLastError = ErrNone;
   std::atomic<int64_t> mLatency{0};
   std::atomic<bool> mMonitor{true};
 

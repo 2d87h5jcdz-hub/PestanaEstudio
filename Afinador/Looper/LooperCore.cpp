@@ -26,8 +26,10 @@ LooperCore::LooperCore() {
 }
 
 LooperCore::~LooperCore() {
+  // Quem roda junções mantém o núcleo vivo até o commit: aqui nenhum trabalho lê mais nada.
   for (auto& tr : mAudio) {
     delete[] tr.main.data;
+    delete[] tr.old.data;
     delete[] tr.layer.data;
     delete[] tr.rec.data;
   }
@@ -40,9 +42,10 @@ LooperCore::~LooperCore() {
   }
   int rh = mRetireHead.load();
   while (rh != mRetireTail.load()) {
-    delete[] mRetire[rh];
+    delete[] mRetire[rh].data;
     rh = (rh + 1) % kRetireSize;
   }
+  for (int i = 0; i < mDeferredCount; i++) delete[] mDeferred[i].data;
 }
 
 // ---------------------------------------------------------------- filas
@@ -64,13 +67,50 @@ void LooperCore::emit(EventType type, int track) {
   mEventTail.store(next, std::memory_order_release);
 }
 
-void LooperCore::retire(float* p) {
-  if (p == nullptr) return;
+void LooperCore::retire(const Buffer& b) {
+  if (b.data == nullptr) return;
   const int tail = mRetireTail.load(std::memory_order_relaxed);
   const int next = (tail + 1) % kRetireSize;
   if (next == mRetireHead.load(std::memory_order_acquire)) return;  // cheia: vaza (não deve acontecer)
-  mRetire[tail] = p;
+  mRetire[tail] = Retired{b.data, bytesOf(b)};
   mRetireTail.store(next, std::memory_order_release);
+}
+
+bool LooperCore::protectedByMerge(const float* p) const {
+  if (p == nullptr) return false;
+  for (const auto& j : mMerge) {
+    if (j.active && (p == j.main || p == j.old)) return true;
+  }
+  return false;
+}
+
+void LooperCore::freeNow(const Retired& r) {
+  if (r.data == nullptr) return;
+  if (protectedByMerge(r.data)) {
+    // Um trabalho de junção ainda lê este buffer: libera depois do commit.
+    if (mDeferredCount < kDeferredSize) {
+      mDeferred[mDeferredCount++] = r;
+      return;
+    }
+    return;   // não deve acontecer (cada trabalho protege no máximo 2 buffers): vaza em vez de quebrar
+  }
+  delete[] r.data;
+  mBytesInUse = std::max<int64_t>(0, mBytesInUse - r.bytes);
+}
+
+void LooperCore::flushDeferred() {
+  int keep = 0;
+  for (int i = 0; i < mDeferredCount; i++) {
+    const Retired r = mDeferred[i];
+    if (protectedByMerge(r.data)) {
+      mDeferred[keep++] = r;
+    } else {
+      delete[] r.data;
+      mBytesInUse = std::max<int64_t>(0, mBytesInUse - r.bytes);
+    }
+  }
+  for (int i = keep; i < mDeferredCount; i++) mDeferred[i] = Retired{nullptr, 0};
+  mDeferredCount = keep;
 }
 
 void LooperCore::collectGarbage() {
@@ -85,8 +125,8 @@ void LooperCore::collectGarbage() {
   int head = mRetireHead.load(std::memory_order_relaxed);
   const int tail = mRetireTail.load(std::memory_order_acquire);
   while (head != tail) {
-    delete[] mRetire[head];
-    mRetire[head] = nullptr;
+    freeNow(mRetire[head]);
+    mRetire[head] = Retired{nullptr, 0};
     head = (head + 1) % kRetireSize;
   }
   mRetireHead.store(head, std::memory_order_release);
@@ -95,23 +135,99 @@ void LooperCore::collectGarbage() {
 LooperCore::Buffer LooperCore::allocate(int64_t frames) {
   Buffer b;
   if (frames <= 0) return b;
+  const int64_t bytes = frames * static_cast<int64_t>(kChannels) * static_cast<int64_t>(sizeof(float));
+  if (mBudget > 0 && mBytesInUse + bytes > mBudget) {
+    mLastError = ErrMemory;
+    return b;
+  }
   b.data = new (std::nothrow) float[static_cast<size_t>(frames) * kChannels]();
-  b.capacity = b.data ? frames : 0;
+  if (b.data == nullptr) {
+    mLastError = ErrMemory;
+    return b;
+  }
+  b.capacity = frames;
+  mBytesInUse += bytes;
   return b;
+}
+
+// ---------------------------------------------------------------- junção em segundo plano
+
+bool LooperCore::takeMergeJob(MergeJob& job) {
+  for (int t = 0; t < kMaxTracks; t++) {
+    MergeSlot& slot = mMerge[t];
+    const MainTrack& m = mMain[t];
+    if (slot.active || !m.main.data || !m.old.data) continue;
+    const int64_t length = mTrackLen[t].load();
+    if (length <= 0) continue;
+    slot.active = true;
+    slot.abandoned = false;
+    slot.main = m.main.data;
+    slot.old = m.old.data;
+    job = MergeJob{t, m.main.data, m.old.data, m.main.capacity, m.old.capacity, length};
+    return true;
+  }
+  return false;
+}
+
+float* LooperCore::runMerge(const MergeJob& job) {
+  if (job.main == nullptr || job.old == nullptr || job.length <= 0) return nullptr;
+  const int64_t len = job.length;
+  const int64_t n = std::min(len, std::min(job.mainCapacity, job.oldCapacity));
+  float* out = new (std::nothrow) float[static_cast<size_t>(len) * kChannels];
+  if (out == nullptr) return nullptr;
+  for (int c = 0; c < kChannels; c++) {
+    const float* a = job.main + static_cast<size_t>(c) * static_cast<size_t>(job.mainCapacity);
+    const float* b = job.old + static_cast<size_t>(c) * static_cast<size_t>(job.oldCapacity);
+    float* o = out + static_cast<size_t>(c) * static_cast<size_t>(len);
+    for (int64_t i = 0; i < n; i++) o[i] = a[i] + b[i];
+    for (int64_t i = std::max<int64_t>(0, n); i < len; i++) o[i] = 0.0f;
+  }
+  return out;
+}
+
+void LooperCore::commitMerge(const MergeJob& job, float* merged) {
+  if (job.track < 0 || job.track >= kMaxTracks) { delete[] merged; return; }
+  MergeSlot& slot = mMerge[job.track];
+  if (!slot.active || slot.main != job.main || slot.old != job.old) {
+    delete[] merged;   // não é o trabalho em andamento desta faixa
+    return;
+  }
+  const bool abandoned = slot.abandoned;
+  slot = MergeSlot();
+  MainTrack& m = mMain[job.track];
+  if (merged != nullptr && !abandoned && m.main.data == job.main && m.old.data == job.old) {
+    Buffer b;
+    b.data = merged;
+    b.capacity = job.length;
+    if (push(Command{CmdSwapMain, job.track, b, job.length, 0, 0, false})) {
+      mBytesInUse += bytesOf(b);
+      m.main = b;
+      m.old = Buffer();
+      merged = nullptr;
+    }
+    // Fila cheia: descarta; a faixa continua com old e um próximo takeMergeJob tenta de novo.
+  }
+  delete[] merged;
+  flushDeferred();
 }
 
 // ---------------------------------------------------------------- configuração
 
 void LooperCore::prepare(double sampleRate, double maxBaseSeconds) {
+  // Junções em andamento: o resultado será descartado no commit; os buffers que elas leem ficam
+  // adiados (freeNow) até lá.
+  for (auto& j : mMerge) if (j.active) j.abandoned = true;
   for (auto& tr : mAudio) {
-    delete[] tr.main.data;
-    delete[] tr.layer.data;
-    delete[] tr.rec.data;
+    freeOwned(tr.main);
+    freeOwned(tr.old);
+    freeOwned(tr.layer);
+    freeOwned(tr.rec);
     tr = AudioTrack();
   }
   int head = mQueueHead.load();
   while (head != mQueueTail.load()) {
-    delete[] mQueue[head].buffer.data;
+    freeOwned(mQueue[head].buffer);
+    mQueue[head].buffer = Buffer();
     head = (head + 1) % kQueueSize;
   }
   mQueueHead.store(0);
@@ -120,12 +236,17 @@ void LooperCore::prepare(double sampleRate, double maxBaseSeconds) {
   mEventTail.store(0);
   int rh = mRetireHead.load();
   while (rh != mRetireTail.load()) {
-    delete[] mRetire[rh];
+    freeNow(mRetire[rh]);
+    mRetire[rh] = Retired{nullptr, 0};
     rh = (rh + 1) % kRetireSize;
   }
   mRetireHead.store(0);
   mRetireTail.store(0);
   for (int t = 0; t < kMaxTracks; t++) resetMain(t);
+  // Contagem do zero: só sobra o que está adiado para junções abandonadas.
+  mBytesInUse = 0;
+  for (int i = 0; i < mDeferredCount; i++) mBytesInUse += mDeferred[i].bytes;
+  mLastError = ErrNone;
 
   mSampleRate = sampleRate > 0 ? sampleRate : 48000.0;
   mMaxBase = static_cast<int64_t>(mSampleRate * std::max(2.0, maxBaseSeconds));
@@ -231,8 +352,12 @@ bool LooperCore::startRecordingMain(int t) {
   if (wasEmpty && !othersHaveContent(t)) {
     // Primeira gravação (manual): define o ciclo.
     Buffer b = allocate(mMaxBase);
-    if (!b.data) return false;
-    if (!push(Command{CmdStartBase, t, b, 0, 0, StartCountIn, false})) { delete[] b.data; return false; }
+    if (!b.data) return false;   // allocate marcou ErrMemory
+    if (!push(Command{CmdStartBase, t, b, 0, 0, StartCountIn, false})) {
+      freeOwned(b);
+      mLastError = ErrBusy;
+      return false;
+    }
     m.rec = b;
     m.state = Recording;
     m.muted = false;
@@ -241,11 +366,11 @@ bool LooperCore::startRecordingMain(int t) {
   }
 
   const int64_t base = mBaseLen.load();
-  if (base <= 0) return false;
-  if (mTrackBusy[t].load()) return false;
-  if (m.layer.data && !mergeLayerMain(t)) return false;
+  if (base <= 0) { mLastError = ErrBusy; return false; }          // ciclo ainda não informado
+  if (mTrackBusy[t].load()) { mLastError = ErrBusy; return false; }  // cauda da gravação anterior
+  if (!prepareOverdubMain(t)) return false;
   const int64_t length = wasEmpty ? base * m.multiplier : mTrackLen[t].load();
-  if (length <= 0) return false;
+  if (length <= 0) { mLastError = ErrBusy; return false; }
   Buffer b = allocate(length);
   if (!b.data) return false;
   if (!mPlaying.load()) push(Command{CmdPlay, t, {}, 0, 0, 0, false});
@@ -253,7 +378,11 @@ bool LooperCore::startRecordingMain(int t) {
     push(Command{CmdMute, t, {}, 0, 0, 0, false});
     m.muted = false;
   }
-  if (!push(Command{CmdStartRecord, t, b, length, 0, 0, false})) { delete[] b.data; return false; }
+  if (!push(Command{CmdStartRecord, t, b, length, 0, 0, false})) {
+    freeOwned(b);
+    mLastError = ErrBusy;
+    return false;
+  }
   m.rec = b;
   m.state = wasEmpty ? Recording : Overdubbing;
   return true;
@@ -261,11 +390,16 @@ bool LooperCore::startRecordingMain(int t) {
 
 bool LooperCore::startAutoBase(int t) {
   const int64_t cycle = autoCycleLength();
-  if (cycle <= 0 || cycle > mMaxBase) return false;
+  // Ciclo maior que o limite da base (memória reservada para ela): conta como falta de memória.
+  if (cycle <= 0 || cycle > mMaxBase) { mLastError = ErrMemory; return false; }
   Buffer b = allocate(cycle);
   if (!b.data) return false;
   const int64_t countIn = mStartMode == StartCountIn ? static_cast<int64_t>(mBeatsPerBar.load()) * mBeatLen.load() : 0;
-  if (!push(Command{CmdStartBase, t, b, cycle, countIn, mStartMode, false})) { delete[] b.data; return false; }
+  if (!push(Command{CmdStartBase, t, b, cycle, countIn, mStartMode, false})) {
+    freeOwned(b);
+    mLastError = ErrBusy;
+    return false;
+  }
   MainTrack& m = mMain[t];
   m.rec = b;
   m.state = Armed;
@@ -285,12 +419,12 @@ bool LooperCore::startAutoBase(int t) {
 
 bool LooperCore::scheduleMain(int t, int64_t startG) {
   MainTrack& m = mMain[t];
-  if (mTrackBusy[t].load()) return false;
-  if (m.layer.data && !mergeLayerMain(t)) return false;
+  if (mTrackBusy[t].load()) { mLastError = ErrBusy; return false; }
+  if (!prepareOverdubMain(t)) return false;
   int64_t cycle = mBaseLen.load();
   if (cycle <= 0) cycle = autoCycleLength();
   const int64_t length = m.state == Empty ? cycle * m.multiplier : mTrackLen[t].load();
-  if (length <= 0) return false;
+  if (length <= 0) { mLastError = ErrBusy; return false; }
   Buffer b = allocate(length);
   if (!b.data) return false;
   if (startG < 0 && !mPlaying.load()) push(Command{CmdPlay, t, {}, 0, 0, 0, false});
@@ -298,7 +432,11 @@ bool LooperCore::scheduleMain(int t, int64_t startG) {
     push(Command{CmdMute, t, {}, 0, 0, 0, false});
     m.muted = false;
   }
-  if (!push(Command{CmdSchedule, t, b, length, startG, 0, false})) { delete[] b.data; return false; }
+  if (!push(Command{CmdSchedule, t, b, length, startG, 0, false})) {
+    freeOwned(b);
+    mLastError = ErrBusy;
+    return false;
+  }
   m.rec = b;
   m.state = Armed;
   mTrackBusy[t].store(true);   // até o áudio confirmar (evita armar duas vezes)
@@ -313,28 +451,44 @@ void LooperCore::stopRecordingMain(int t) {
   if (mBaseTrack == t) mBaseTrack = -1;
 }
 
-bool LooperCore::mergeLayerMain(int t) {
+bool LooperCore::mergeOldMainSync(int t) {
+  // Caso raro: nova sobregravação com a junção anterior ainda pendente. Soma main + old aqui.
   MainTrack& m = mMain[t];
   const int64_t length = mTrackLen[t].load();
-  if (length <= 0 || !m.main.data || !m.layer.data) return false;
+  if (length <= 0 || !m.main.data || !m.old.data) { mLastError = ErrBusy; return false; }
   Buffer merged = allocate(length);
   if (!merged.data) return false;
+  const int64_t n = std::min(length, std::min(m.main.capacity, m.old.capacity));
   for (int c = 0; c < kChannels; c++) {
     const float* a = m.main.ch(c);
-    const float* b = m.layer.ch(c);
+    const float* b = m.old.ch(c);
     float* o = merged.ch(c);
-    for (int64_t i = 0; i < length; i++) o[i] = a[i] + b[i];
+    for (int64_t i = 0; i < n; i++) o[i] = a[i] + b[i];
   }
   if (!push(Command{CmdSwapMain, t, merged, length, 0, 0, false})) {
-    delete[] merged.data;
+    freeOwned(merged);
+    mLastError = ErrBusy;
     return false;
   }
+  // Um trabalho em segundo plano desta faixa (se houver) vai ver ponteiros diferentes e descartar.
   m.main = merged;
+  m.old = Buffer();
+  return true;
+}
+
+bool LooperCore::prepareOverdubMain(int t) {
+  MainTrack& m = mMain[t];
+  if (!m.layer.data) return true;
+  if (m.old.data && !mergeOldMainSync(t)) return false;
+  // Instantâneo: a camada anterior vira `old` e será somada ao main em segundo plano.
+  if (!push(Command{CmdLayerToOld, t, {}, 0, 0, 0, false})) { mLastError = ErrBusy; return false; }
+  m.old = m.layer;
   m.layer = Buffer();
   return true;
 }
 
 bool LooperCore::press(int track) {
+  mLastError = ErrNone;
   if (track < 0 || track >= kMaxTracks) return false;
   collectGarbage();   // estado em dia antes de decidir
   MainTrack& m = mMain[track];
@@ -398,9 +552,13 @@ void LooperCore::undo(int track) {
   collectGarbage();
   MainTrack& m = mMain[track];
   if (m.state != Playing || mTrackBusy[track].load()) return;
+  // O espelho só muda se o comando entrou na fila (espelho e áudio precisam apontar para os mesmos
+  // buffers: a junção em segundo plano depende disso).
   if (m.layer.data) {
-    push(Command{CmdDropLayer, track, {}, 0, 0, 0, false});
-    m.layer = Buffer();
+    if (push(Command{CmdDropLayer, track, {}, 0, 0, 0, false})) m.layer = Buffer();
+  } else if (m.old.data) {
+    // Junção ainda não aconteceu: dá para tirar a camada anterior também.
+    if (push(Command{CmdDropOld, track, {}, 0, 0, 0, false})) m.old = Buffer();
   } else {
     clearTrack(track);
   }
@@ -500,7 +658,7 @@ int64_t LooperCore::trackLength(int track) const {
 
 void LooperCore::resetAudioTrack(int t) {
   AudioTrack& tr = mAudio[t];
-  retire(tr.main); retire(tr.layer); retire(tr.rec);
+  retire(tr.main); retire(tr.old); retire(tr.layer); retire(tr.rec);
   const bool muted = false;
   tr = AudioTrack();
   tr.muted = muted;
@@ -693,10 +851,29 @@ void LooperCore::applyCommand(const Command& c) {
       break;
     }
     case CmdSwapMain: {
+      // main novo = main + old; a layer fica como está.
       AudioTrack& tr = mAudio[t];
       retire(tr.main);
-      retire(tr.layer);
+      retire(tr.old);
       tr.main = c.buffer;
+      tr.old = Buffer();
+      break;
+    }
+    case CmdLayerToOld: {
+      AudioTrack& tr = mAudio[t];
+      if (!tr.layer.data) break;
+      if (tr.old.data) {
+        // Não deveria acontecer (a principal junta antes): soma old na layer, que vira a nova old,
+        // para os ponteiros continuarem iguais aos do espelho.
+        const int64_t n = std::min(tr.length, std::min(tr.old.capacity, tr.layer.capacity));
+        for (int ch = 0; ch < kChannels; ch++) {
+          float* d = tr.layer.ch(ch);
+          const float* s = tr.old.ch(ch);
+          for (int64_t i = 0; i < n; i++) d[i] += s[i];
+        }
+        retire(tr.old);
+      }
+      tr.old = tr.layer;
       tr.layer = Buffer();
       break;
     }
@@ -704,6 +881,12 @@ void LooperCore::applyCommand(const Command& c) {
       AudioTrack& tr = mAudio[t];
       retire(tr.layer);
       tr.layer = Buffer();
+      break;
+    }
+    case CmdDropOld: {
+      AudioTrack& tr = mAudio[t];
+      retire(tr.old);
+      tr.old = Buffer();
       break;
     }
     case CmdClearTrack: {
@@ -836,6 +1019,7 @@ void LooperCore::process(const float* const* in, float* const* out, int frames) 
           const int64_t idx = wrap(mG - tr.anchor, tr.length);
           float s0 = 0.0f, s1 = 0.0f;
           if (tr.main.data) { s0 += tr.main.ch(0)[idx]; s1 += tr.main.ch(1)[idx]; }
+          if (tr.old.data) { s0 += tr.old.ch(0)[idx]; s1 += tr.old.ch(1)[idx]; }
           if (tr.layer.data) { s0 += tr.layer.ch(0)[idx]; s1 += tr.layer.ch(1)[idx]; }
           if (tr.rec.data && !tr.isBase) { s0 += tr.rec.ch(0)[idx]; s1 += tr.rec.ch(1)[idx]; }
           s0 *= volume[t];

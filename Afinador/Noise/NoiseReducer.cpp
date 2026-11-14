@@ -36,8 +36,9 @@ NoiseReducer::NoiseReducer(int fftSize) {
     mSin[static_cast<size_t>(i)] = static_cast<float>(std::sin(2.0 * kPi * i / mN));
   }
   const size_t nb = static_cast<size_t>(bins());
-  mProfile[0].assign(nb, 0.0f);
-  mProfile[1].assign(nb, 0.0f);
+  mProfileShared.assign(nb, 0.0f);
+  mProfileRT.assign(nb, 0.0f);
+  mLearned.assign(nb, 0.0f);
   prepare(48000.0);
 }
 
@@ -58,6 +59,7 @@ void NoiseReducer::prepare(double sampleRate) {
   mPowerSmooth.assign(nb, 0.0f);
   mLearnAcc.assign(nb, 0.0);
   mLearnFrames = 0;
+  // Um perfil aprendido ainda não publicado continua pendente (mLearnedReady): não se perde.
   mRover = mN - mHop;
 }
 
@@ -67,14 +69,21 @@ void NoiseReducer::setAmount(float amount) { mAmount.store(clampf(amount, 0.0f, 
 
 void NoiseReducer::setProfile(const float* profile, int count) {
   if (profile == nullptr || count <= 0) { clearProfile(); return; }
-  const int inactive = 1 - mActive.load();
-  std::vector<float>& dst = mProfile[inactive];
-  for (int k = 0; k < bins(); k++) dst[static_cast<size_t>(k)] = k < count ? std::max(0.0f, profile[k]) : 0.0f;
-  mActive.store(inactive);
+  std::lock_guard<std::mutex> lock(mSwapMutex);
+  for (int k = 0; k < bins(); k++) {
+    mProfileShared[static_cast<size_t>(k)] = k < count ? std::max(0.0f, profile[k]) : 0.0f;
+  }
+  mSharedHas = true;
+  mPendingToRT.store(true, std::memory_order_release);
   mHasProfile.store(true);
 }
 
-void NoiseReducer::clearProfile() { mHasProfile.store(false); }
+void NoiseReducer::clearProfile() {
+  std::lock_guard<std::mutex> lock(mSwapMutex);
+  mSharedHas = false;
+  mPendingToRT.store(true, std::memory_order_release);
+  mHasProfile.store(false);
+}
 
 void NoiseReducer::startLearning(double seconds) {
   const int frames = std::max(4, static_cast<int>(seconds * mSampleRate / mHop));
@@ -83,11 +92,34 @@ void NoiseReducer::startLearning(double seconds) {
 }
 
 int NoiseReducer::copyProfile(float* out, int max) const {
-  if (!mHasProfile.load()) return 0;
-  const std::vector<float>& p = mProfile[mActive.load()];
+  if (out == nullptr || max <= 0) return 0;
+  std::lock_guard<std::mutex> lock(mSwapMutex);
+  if (!mSharedHas) return 0;
   const int n = std::min(max, bins());
-  for (int k = 0; k < n; k++) out[k] = p[static_cast<size_t>(k)];
+  for (int k = 0; k < n; k++) out[k] = mProfileShared[static_cast<size_t>(k)];
   return n;
+}
+
+void NoiseReducer::syncProfile() {
+  if (!mPendingToRT.load(std::memory_order_acquire) && !mLearnedReady) return;   // nada a trocar
+  std::unique_lock<std::mutex> lock(mSwapMutex, std::try_to_lock);
+  if (!lock.owns_lock()) return;                 // a principal está mexendo: tenta no próximo quadro
+  const size_t nb = mProfileRT.size();
+  if (mPendingToRT.load()) {
+    if (mSharedHas) std::copy(mProfileShared.begin(), mProfileShared.end(), mProfileRT.begin());
+    mHasProfileRT = mSharedHas;
+    mPendingToRT.store(false);
+  }
+  if (mLearnedReady) {
+    // O aprendizado terminou depois de qualquer perfil pendente: ele vale.
+    for (size_t k = 0; k < nb; k++) mProfileShared[k] = mLearned[k];
+    std::copy(mLearned.begin(), mLearned.end(), mProfileRT.begin());
+    mSharedHas = true;
+    mHasProfileRT = true;
+    mLearnedReady = false;
+    mHasProfile.store(true);
+    mLearning.store(false);
+  }
 }
 
 // ---------------------------------------------------------------- FFT (radix 2)
@@ -136,6 +168,7 @@ void NoiseReducer::process(float* const* channels, int numChannels, int frames) 
 void NoiseReducer::processFrame(int nch) {
   const int n = mN;
   const int nb = bins();
+  syncProfile();
   for (int c = 0; c < nch; c++) {
     for (int i = 0; i < n; i++) {
       mRe[c][static_cast<size_t>(i)] = mInFifo[c][static_cast<size_t>(i)] * mWindow[static_cast<size_t>(i)];
@@ -152,25 +185,26 @@ void NoiseReducer::processFrame(int nch) {
     mPower[static_cast<size_t>(k)] = p / static_cast<float>(nch);
   }
 
-  if (mLearning.load()) {
+  if (mLearning.load() && !mLearnedReady) {
     for (int k = 0; k < nb; k++) mLearnAcc[static_cast<size_t>(k)] += mPower[static_cast<size_t>(k)];
     if (++mLearnFrames >= mLearnFramesWanted.load()) {
-      const int inactive = 1 - mActive.load();
       for (int k = 0; k < nb; k++) {
-        mProfile[inactive][static_cast<size_t>(k)] = static_cast<float>(mLearnAcc[static_cast<size_t>(k)] / mLearnFrames);
+        const float v = static_cast<float>(mLearnAcc[static_cast<size_t>(k)] / mLearnFrames);
+        mLearned[static_cast<size_t>(k)] = v;
+        mProfileRT[static_cast<size_t>(k)] = v;   // vale já neste quadro
         mLearnAcc[static_cast<size_t>(k)] = 0.0;
       }
+      mHasProfileRT = true;
       mLearnFrames = 0;
-      mActive.store(inactive);
-      mHasProfile.store(true);
-      mLearning.store(false);
+      mLearnedReady = true;   // publicado no próximo try_lock (isLearning fica true até lá)
+      syncProfile();
     }
   }
 
   const float amount = mAmount.load();
-  const bool reduce = mHasProfile.load() && amount > 0.001f;
+  const bool reduce = mHasProfileRT && amount > 0.001f;
   if (reduce) {
-    const std::vector<float>& prof = mProfile[mActive.load()];
+    const std::vector<float>& prof = mProfileRT;
     const float alpha = 1.5f + 2.5f * amount;
     const float floorGain = std::pow(10.0f, -(8.0f + 27.0f * amount) / 20.0f);
     const float release = static_cast<float>(std::exp(-mHop / (mSampleRate * 0.06)));

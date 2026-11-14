@@ -10,10 +10,15 @@
 //    "ruído musical" (chiadinhos borbulhando) típico da subtração espectral.
 // O mesmo ganho vale para os dois canais (a imagem estéreo não muda).
 //
-// Threads: setAmount/setProfile/startLearning/copyProfile na principal; process() no áudio.
+// Threads: setAmount/setProfile/clearProfile/startLearning/copyProfile na principal; process() no
+// áudio. O áudio tem o próprio perfil de tempo real (mProfileRT). A troca com a principal passa por
+// um perfil compartilhado protegido por mutex: a principal usa lock; o áudio usa SÓ try_lock no
+// começo de cada quadro (pega o perfil pendente e publica o aprendido; se não conseguir, tenta no
+// próximo quadro). Nenhuma alocação no áudio: todos os vetores são dimensionados no construtor/prepare.
 #pragma once
 #include <atomic>
 #include <cstdint>
+#include <mutex>
 #include <vector>
 
 namespace pestana {
@@ -41,6 +46,7 @@ public:
   bool hasProfile() const { return mHasProfile.load(); }
   /// Aprende o perfil com os próximos `seconds` de entrada (o músico em silêncio).
   void startLearning(double seconds);
+  /// Só volta a false depois que o perfil aprendido foi publicado (copyProfile já o devolve).
   bool isLearning() const { return mLearning.load(); }
   /// Copia o perfil atual. Retorna quantos valores copiou.
   int copyProfile(float* out, int max) const;
@@ -59,6 +65,7 @@ public:
 
 private:
   void processFrame(int numChannels);
+  void syncProfile();   // áudio: try_lock no começo do quadro
   void fft(std::vector<float>& re, std::vector<float>& im, bool inverse) const;
 
   int mN, mHop;
@@ -67,9 +74,15 @@ private:
   std::vector<int> mBitRev;
   std::vector<float> mCos, mSin;
 
-  // perfil com troca atômica (escrito fora do áudio, lido no áudio)
-  std::vector<float> mProfile[2];
-  std::atomic<int> mActive{0};
+  // perfil compartilhado (protegido por mSwapMutex)
+  mutable std::mutex mSwapMutex;
+  std::vector<float> mProfileShared;
+  bool mSharedHas = false;
+  std::atomic<bool> mPendingToRT{false};   // a principal mudou o perfil: o áudio ainda não pegou
+  // perfil de tempo real [áudio]
+  std::vector<float> mProfileRT;
+  bool mHasProfileRT = false;
+  // o que a tela vê (setProfile/clearProfile ou perfil aprendido publicado)
   std::atomic<bool> mHasProfile{false};
   std::atomic<float> mAmount{0.5f};
 
@@ -78,6 +91,8 @@ private:
   std::atomic<int> mLearnFramesWanted{0};
   std::vector<double> mLearnAcc;
   int mLearnFrames = 0;
+  std::vector<float> mLearned;    // [áudio] perfil aprendido esperando ser publicado
+  bool mLearnedReady = false;     // [áudio]
 
   // estado do STFT em tempo real
   std::vector<float> mInFifo[kMaxChannels];

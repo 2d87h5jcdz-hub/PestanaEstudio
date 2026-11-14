@@ -44,7 +44,17 @@ typedef NS_ENUM(NSInteger, PestanaLoopPhase) {
 @property (nonatomic, readonly) NSInteger currentBeat;
 
 /// false = não deu agora (ex.: ainda fechando a gravação anterior); tente de novo em alguns ms.
+/// O motivo fica em lastPressError.
 - (BOOL)pressTrack:(NSInteger)track;
+/// Motivo da última recusa de pressTrack: 0 = nenhum, 1 = ocupado (tente de novo), 2 = sem memória.
+@property (nonatomic, readonly) NSInteger lastPressError;
+/// Limite de bytes dos buffers do Loop (0 = sem limite).
+- (void)setMemoryBudget:(int64_t)bytes;
+/// Bytes usados agora pelos buffers do Loop.
+@property (nonatomic, readonly) int64_t memoryBytesInUse;
+/// Junta em segundo plano (fila utility) as camadas pendentes (main + old) e entrega na principal.
+/// Chamar periodicamente, junto com collectGarbage.
+- (void)runPendingMerges;
 - (void)toggleMuteTrack:(NSInteger)track;
 - (void)undoTrack:(NSInteger)track;
 - (void)clearTrack:(NSInteger)track;

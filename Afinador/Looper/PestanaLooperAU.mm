@@ -13,7 +13,8 @@ struct LooperScratch {
 } // namespace
 
 @interface PestanaLooperAU () {
-  std::unique_ptr<pestana::LooperCore> _core;
+  // shared_ptr: as junções em segundo plano mantêm o núcleo vivo mesmo se o AU for destruído.
+  std::shared_ptr<pestana::LooperCore> _core;
   std::unique_ptr<LooperScratch> _scratch;
   AUAudioUnitBus *_inputBus;
   AUAudioUnitBus *_outputBus;
@@ -50,7 +51,7 @@ struct LooperScratch {
                                        error:(NSError **)outError {
   self = [super initWithComponentDescription:componentDescription options:options error:outError];
   if (self == nil) return nil;
-  _core = std::make_unique<pestana::LooperCore>();
+  _core = std::make_shared<pestana::LooperCore>();
   _scratch = std::make_unique<LooperScratch>();
   _preparedRate = 0;
   AVAudioFormat *format = [[AVAudioFormat alloc] initStandardFormatWithSampleRate:48000 channels:2];
@@ -145,6 +146,25 @@ struct LooperScratch {
 - (NSInteger)currentBeat { return _core->currentBeat(); }
 
 - (BOOL)pressTrack:(NSInteger)track { return _core->press((int)track) ? YES : NO; }
+- (NSInteger)lastPressError { return (NSInteger)_core->lastError(); }
+- (void)setMemoryBudget:(int64_t)bytes { _core->setMemoryBudget(bytes); }
+- (int64_t)memoryBytesInUse { return _core->bytesInUse(); }
+
+- (void)runPendingMerges {
+  // Cada bloco captura uma cópia do shared_ptr (não captura self): o núcleo vive até o commit.
+  std::shared_ptr<pestana::LooperCore> core = _core;
+  if (!core) return;
+  pestana::LooperCore::MergeJob job;
+  while (core->takeMergeJob(job)) {
+    const pestana::LooperCore::MergeJob captured = job;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+      float *merged = pestana::LooperCore::runMerge(captured);
+      dispatch_async(dispatch_get_main_queue(), ^{
+        core->commitMerge(captured, merged);
+      });
+    });
+  }
+}
 - (void)toggleMuteTrack:(NSInteger)track { _core->toggleMute((int)track); }
 - (void)undoTrack:(NSInteger)track { _core->undo((int)track); }
 - (void)clearTrack:(NSInteger)track { _core->clearTrack((int)track); }
