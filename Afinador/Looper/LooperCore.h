@@ -12,6 +12,9 @@
 //   que o áudio troca por comando. Enquanto o trabalho roda, os buffers que ele lê não são liberados
 //   (ficam adiados até o commit). Só se uma nova sobregravação começar com `old` ainda pendente a
 //   principal soma main + old na hora (caso raro).
+// - Gravação manual começa já (no bloco em que o comando chega). Se ela fechar sem ter escrito
+//   nenhuma amostra (toque duplo), o áudio devolve o buffer e avisa a principal (EvCancelled leva o
+//   ponteiro): espelho e áudio nunca ficam com buffers diferentes.
 // - Desfazer tira a `layer`; sem `layer`, tira a `old` (se a junção ainda não aconteceu); sem as
 //   duas, apaga a faixa.
 // - Memória: toda alocação passa por um orçamento opcional (setMemoryBudget); quando estoura, a ação
@@ -105,11 +108,20 @@ public:
   // ---------- [principal] memória ----------
   /// Limite de bytes dos buffers de áudio (0 = sem limite).
   void setMemoryBudget(int64_t bytes) { mBudget = bytes > 0 ? bytes : 0; }
-  /// Bytes alocados agora (inclui buffers devolvidos ainda não liberados).
+  /// Bytes alocados agora (inclui buffers devolvidos ainda não liberados e a reserva das junções
+  /// em andamento).
   int64_t bytesInUse() const { return mBytesInUse; }
 
+  // ---------- [qualquer thread] diagnóstico ----------
+  /// Eventos/buffers descartados por fila cheia (não deve passar de 0; buffer descartado = vazamento).
+  int droppedEvents() const { return mDropped.load(std::memory_order_relaxed); }
+  /// Vezes em que o áudio achou um estado que a principal garante não acontecer (não deve passar de 0).
+  int inconsistencies() const { return mInconsistent.load(std::memory_order_relaxed); }
+
   // ---------- junção de camadas em segundo plano ----------
-  /// [principal] Pega uma faixa com `old` e sem junção em andamento. false se não há nada a juntar.
+  /// [principal] Pega uma faixa com `old` e sem junção em andamento. Reserva no orçamento os bytes do
+  /// resultado (devolvidos se a junção for descartada); se a reserva não couber, não pega agora.
+  /// false se não há nada a juntar (ou não coube).
   bool takeMergeJob(MergeJob& job);
   /// [qualquer thread] Soma main + old num buffer novo (planar, capacity = length). nullptr se faltar memória.
   static float* runMerge(const MergeJob& job);
@@ -166,12 +178,14 @@ private:
   };
 
   enum EventType : int { EvStarted, EvFinished, EvBaseClosed, EvCancelled, EvBaseDiscarded };
-  struct Event { EventType type; int track; };
+  /// `data`: EvCancelled leva o buffer que o áudio devolveu (a principal tira do espelho).
+  struct Event { EventType type; int track; const float* data; };
 
   struct AudioTrack {
     Buffer main, old, layer, rec;
     bool hasRec = false;        // rec ativo (armado, gravando ou cauda)
     bool started = false;       // já passou de startG
+    bool wrote = false;         // a janela de gravação já escreveu alguma amostra
     int64_t startG = 0, stopG = kNever;
     int64_t length = 0;         // 0 = vazia
     int64_t anchor = 0;
@@ -193,6 +207,7 @@ private:
     bool abandoned = false;     // prepare() rodou no meio: o resultado é descartado
     const float* main = nullptr;
     const float* old = nullptr;
+    int64_t reserved = 0;       // bytes do resultado já contados em mBytesInUse
   };
   MergeSlot mMerge[kMaxTracks];
 
@@ -203,18 +218,21 @@ private:
   }
 
 
+  // Pior caso realista: a fila de comandos tem 256 posições e cada comando devolve no máximo
+  // kMaxTracks × 4 buffers (limpar tudo); os eventos são poucos por comando e por volta, e a principal
+  // os lê a 30 Hz. As filas abaixo cobrem isso com folga, sem alocar nada no áudio.
   static constexpr int kQueueSize = 256;
   Command mQueue[kQueueSize];
   std::atomic<int> mQueueHead{0}, mQueueTail{0};
   bool push(const Command& c);
 
-  static constexpr int kEventSize = 256;
+  static constexpr int kEventSize = 4096;
   Event mEvents[kEventSize];
   std::atomic<int> mEventHead{0}, mEventTail{0};
-  void emit(EventType type, int track);   // áudio
+  void emit(EventType type, int track, const float* data = nullptr);   // áudio
   void handleEvent(const Event& e);       // principal
 
-  static constexpr int kRetireSize = 256;
+  static constexpr int kRetireSize = kQueueSize * kMaxTracks * 4 + 64;
   Retired mRetire[kRetireSize] = {};
   std::atomic<int> mRetireHead{0}, mRetireTail{0};
   void retire(const Buffer& b);   // áudio
@@ -230,7 +248,10 @@ private:
 
   // áudio
   void applyCommand(const Command& c);
-  void finishRecording(int t);
+  /// Fecha a camada. Sem nenhuma amostra escrita (toque duplo, parar logo depois de começar), a
+  /// camada é devolvida e a principal avisada (EvCancelled com o ponteiro) em vez de virar uma camada vazia.
+  void finishRecording(int t, bool discardIfEmpty = true);
+  void cancelRec(int t);      // devolve o rec ainda vazio e avisa a principal
   void closeBase(int t, int64_t base);
   void resetAudioTrack(int t);
   void writePreroll(AudioTrack& tr);
@@ -252,6 +273,8 @@ private:
   int64_t mBudget = 0;           // [principal] 0 = sem limite
   int64_t mBytesInUse = 0;       // [principal]
   PressError mLastError = ErrNone;
+  std::atomic<int> mDropped{0};
+  std::atomic<int> mInconsistent{0};
   std::atomic<int64_t> mLatency{0};
   std::atomic<bool> mMonitor{true};
 

@@ -59,11 +59,14 @@ bool LooperCore::push(const Command& c) {
   return true;
 }
 
-void LooperCore::emit(EventType type, int track) {
+void LooperCore::emit(EventType type, int track, const float* data) {
   const int tail = mEventTail.load(std::memory_order_relaxed);
   const int next = (tail + 1) % kEventSize;
-  if (next == mEventHead.load(std::memory_order_acquire)) return;
-  mEvents[tail] = Event{type, track};
+  if (next == mEventHead.load(std::memory_order_acquire)) {
+    mDropped.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
+  mEvents[tail] = Event{type, track, data};
   mEventTail.store(next, std::memory_order_release);
 }
 
@@ -71,7 +74,10 @@ void LooperCore::retire(const Buffer& b) {
   if (b.data == nullptr) return;
   const int tail = mRetireTail.load(std::memory_order_relaxed);
   const int next = (tail + 1) % kRetireSize;
-  if (next == mRetireHead.load(std::memory_order_acquire)) return;  // cheia: vaza (não deve acontecer)
+  if (next == mRetireHead.load(std::memory_order_acquire)) {
+    mDropped.fetch_add(1, std::memory_order_relaxed);   // cheia: vaza (não deve acontecer)
+    return;
+  }
   mRetire[tail] = Retired{b.data, bytesOf(b)};
   mRetireTail.store(next, std::memory_order_release);
 }
@@ -92,7 +98,9 @@ void LooperCore::freeNow(const Retired& r) {
       mDeferred[mDeferredCount++] = r;
       return;
     }
-    return;   // não deve acontecer (cada trabalho protege no máximo 2 buffers): vaza em vez de quebrar
+    // Não deve acontecer (cada trabalho protege no máximo 2 buffers): vaza em vez de quebrar.
+    mDropped.fetch_add(1, std::memory_order_relaxed);
+    return;
   }
   delete[] r.data;
   mBytesInUse = std::max<int64_t>(0, mBytesInUse - r.bytes);
@@ -114,6 +122,9 @@ void LooperCore::flushDeferred() {
 }
 
 void LooperCore::collectGarbage() {
+  // Lê o fim da fila de retire ANTES dos eventos: o áudio emite o evento antes de devolver o buffer,
+  // então todo buffer liberado aqui já teve o seu evento tratado (o espelho não fica com ele).
+  const int tail = mRetireTail.load(std::memory_order_acquire);
   int eh = mEventHead.load(std::memory_order_relaxed);
   const int et = mEventTail.load(std::memory_order_acquire);
   while (eh != et) {
@@ -123,7 +134,6 @@ void LooperCore::collectGarbage() {
   mEventHead.store(eh, std::memory_order_release);
 
   int head = mRetireHead.load(std::memory_order_relaxed);
-  const int tail = mRetireTail.load(std::memory_order_acquire);
   while (head != tail) {
     freeNow(mRetire[head]);
     mRetire[head] = Retired{nullptr, 0};
@@ -159,10 +169,15 @@ bool LooperCore::takeMergeJob(MergeJob& job) {
     if (slot.active || !m.main.data || !m.old.data) continue;
     const int64_t length = mTrackLen[t].load();
     if (length <= 0) continue;
+    // O resultado ocupa memória até o main antigo e a old serem liberados: reserva já.
+    const int64_t bytes = length * static_cast<int64_t>(kChannels) * static_cast<int64_t>(sizeof(float));
+    if (mBudget > 0 && mBytesInUse + bytes > mBudget) continue;   // não cabe agora; tenta depois
+    mBytesInUse += bytes;
     slot.active = true;
     slot.abandoned = false;
     slot.main = m.main.data;
     slot.old = m.old.data;
+    slot.reserved = bytes;
     job = MergeJob{t, m.main.data, m.old.data, m.main.capacity, m.old.capacity, length};
     return true;
   }
@@ -193,20 +208,24 @@ void LooperCore::commitMerge(const MergeJob& job, float* merged) {
     return;
   }
   const bool abandoned = slot.abandoned;
+  const int64_t reserved = slot.reserved;
   slot = MergeSlot();
+  bool used = false;
   MainTrack& m = mMain[job.track];
   if (merged != nullptr && !abandoned && m.main.data == job.main && m.old.data == job.old) {
     Buffer b;
     b.data = merged;
     b.capacity = job.length;
     if (push(Command{CmdSwapMain, job.track, b, job.length, 0, 0, false})) {
-      mBytesInUse += bytesOf(b);
+      // Os bytes já estavam reservados no takeMergeJob.
+      used = true;
       m.main = b;
       m.old = Buffer();
       merged = nullptr;
     }
     // Fila cheia: descarta; a faixa continua com old e um próximo takeMergeJob tenta de novo.
   }
+  if (!used) mBytesInUse = std::max<int64_t>(0, mBytesInUse - reserved);   // devolve a reserva
   delete[] merged;
   flushDeferred();
 }
@@ -243,9 +262,11 @@ void LooperCore::prepare(double sampleRate, double maxBaseSeconds) {
   mRetireHead.store(0);
   mRetireTail.store(0);
   for (int t = 0; t < kMaxTracks; t++) resetMain(t);
-  // Contagem do zero: só sobra o que está adiado para junções abandonadas.
+  // Contagem do zero: só sobra o que está adiado e a reserva das junções abandonadas (o resultado
+  // delas pode estar alocado agora numa fila de fundo; o commit devolve).
   mBytesInUse = 0;
   for (int i = 0; i < mDeferredCount; i++) mBytesInUse += mDeferred[i].bytes;
+  for (const auto& j : mMerge) if (j.active) mBytesInUse += j.reserved;
   mLastError = ErrNone;
 
   mSampleRate = sampleRate > 0 ? sampleRate : 48000.0;
@@ -383,6 +404,7 @@ bool LooperCore::startRecordingMain(int t) {
     mLastError = ErrBusy;
     return false;
   }
+  mTrackBusy[t].store(true);   // até o áudio fechar a camada (evita outra gravação em cima)
   m.rec = b;
   m.state = wasEmpty ? Recording : Overdubbing;
   return true;
@@ -607,12 +629,24 @@ void LooperCore::handleEvent(const Event& e) {
       if (mBaseTrack == e.track) mBaseTrack = -1;
       if (m.state == Recording || m.state == Armed) mirrorFinish(m);
       break;
-    case EvCancelled:
-      if (m.state == Armed) {
-        m.rec = Buffer();   // a thread de áudio já devolveu o buffer
-        m.state = m.main.data ? Playing : Empty;
+    case EvCancelled: {
+      // A thread de áudio já devolveu este buffer: nenhum ponteiro do espelho pode ficar com ele,
+      // mesmo que a principal já o tenha guardado como camada (mirrorFinish).
+      const float* p = e.data;
+      if (p != nullptr) {
+        if (m.rec.data == p) m.rec = Buffer();
+        if (m.layer.data == p) m.layer = Buffer();
+        if (m.main.data == p) { m.main = Buffer(); m.layer = Buffer(); m.old = Buffer(); }
+      } else if (m.state == Armed) {
+        m.rec = Buffer();
+      }
+      if (!m.main.data) {
+        resetMain(e.track);   // faixa nova cancelada: volta a vazia
+      } else if (m.state == Armed || m.state == Recording || m.state == Overdubbing) {
+        m.state = Playing;
       }
       break;
+    }
     case EvBaseDiscarded:
       if (m.state != Empty) resetMain(e.track);
       if (mBaseTrack == e.track) mBaseTrack = -1;
@@ -668,26 +702,44 @@ void LooperCore::resetAudioTrack(int t) {
   mTrackPeak[t].store(0.0f);
 }
 
-void LooperCore::finishRecording(int t) {
+void LooperCore::cancelRec(int t) {
   AudioTrack& tr = mAudio[t];
+  const Buffer rec = tr.rec;
+  tr.rec = Buffer();
+  tr.hasRec = false;
+  tr.started = false;
+  tr.wrote = false;
+  tr.isBase = false;
+  tr.fixedBase = 0;
+  if (!tr.main.data) { tr.length = 0; tr.anchor = 0; mTrackLen[t].store(0); mTrackAnchor[t].store(0); }
+  mTrackBusy[t].store(false);
+  emit(EvCancelled, t, rec.data);   // antes do retire (ver collectGarbage)
+  retire(rec);
+}
+
+void LooperCore::finishRecording(int t, bool discardIfEmpty) {
+  AudioTrack& tr = mAudio[t];
+  if (discardIfEmpty && tr.rec.data && !tr.wrote && !tr.isBase) {
+    cancelRec(t);
+    return;
+  }
   if (tr.rec.data) {
     if (!tr.main.data) {
       tr.main = tr.rec;
     } else if (!tr.layer.data) {
       tr.layer = tr.rec;
     } else {
-      // Não deveria acontecer (a principal junta antes de sobregravar): soma na camada.
-      for (int c = 0; c < kChannels; c++) {
-        float* d = tr.layer.ch(c);
-        const float* s = tr.rec.ch(c);
-        for (int64_t i = 0; i < tr.length; i++) d[i] += s[i];
-      }
-      retire(tr.rec);
+      // Não acontece: a principal move layer → old antes de sobregravar. Sem somar aqui (O(N) no
+      // áudio): a gravação nova vira a layer, como no espelho, e a camada anterior é devolvida.
+      mInconsistent.fetch_add(1, std::memory_order_relaxed);
+      retire(tr.layer);
+      tr.layer = tr.rec;
     }
   }
   tr.rec = Buffer();
   tr.hasRec = false;
   tr.started = false;
+  tr.wrote = false;
   tr.isBase = false;
   tr.fixedBase = 0;
   mTrackBusy[t].store(false);
@@ -777,7 +829,10 @@ void LooperCore::applyCommand(const Command& c) {
       }
       tr.rec = c.buffer;
       tr.hasRec = true;
-      tr.started = false;
+      // Manual começa já: parar logo em seguida (toque duplo) fecha uma camada vazia, igual ao
+      // espelho da principal, em vez de cancelar e devolver um buffer que o espelho ainda guarda.
+      tr.started = true;
+      tr.wrote = false;
       tr.startG = mG;
       tr.stopG = kNever;
       mTrackBusy[t].store(true);
@@ -799,6 +854,7 @@ void LooperCore::applyCommand(const Command& c) {
       tr.rec = c.buffer;
       tr.hasRec = true;
       tr.started = false;
+      tr.wrote = false;
       tr.startG = start;
       tr.stopG = start + tr.length;
       mTrackBusy[t].store(true);
@@ -823,12 +879,7 @@ void LooperCore::applyCommand(const Command& c) {
       }
       if (!tr.started) {
         // Ainda armada: cancela.
-        retire(tr.rec);
-        tr.rec = Buffer();
-        tr.hasRec = false;
-        if (!tr.main.data) { tr.length = 0; tr.anchor = 0; mTrackLen[t].store(0); mTrackAnchor[t].store(0); }
-        mTrackBusy[t].store(false);
-        emit(EvCancelled, t);
+        cancelRec(t);
         break;
       }
       tr.stopG = std::min(tr.stopG, mG);
@@ -838,12 +889,7 @@ void LooperCore::applyCommand(const Command& c) {
       AudioTrack& tr = mAudio[t];
       if (!tr.hasRec) break;
       if (!tr.started && !tr.isBase) {
-        retire(tr.rec);
-        tr.rec = Buffer();
-        tr.hasRec = false;
-        if (!tr.main.data) { tr.length = 0; tr.anchor = 0; mTrackLen[t].store(0); mTrackAnchor[t].store(0); }
-        mTrackBusy[t].store(false);
-        emit(EvCancelled, t);
+        cancelRec(t);
       } else if (tr.started) {
         // Já começou: vira um "parar já" (o evento de fim atualiza a tela).
         tr.stopG = std::min(tr.stopG, mG);
@@ -863,14 +909,9 @@ void LooperCore::applyCommand(const Command& c) {
       AudioTrack& tr = mAudio[t];
       if (!tr.layer.data) break;
       if (tr.old.data) {
-        // Não deveria acontecer (a principal junta antes): soma old na layer, que vira a nova old,
-        // para os ponteiros continuarem iguais aos do espelho.
-        const int64_t n = std::min(tr.length, std::min(tr.old.capacity, tr.layer.capacity));
-        for (int ch = 0; ch < kChannels; ch++) {
-          float* d = tr.layer.ch(ch);
-          const float* s = tr.old.ch(ch);
-          for (int64_t i = 0; i < n; i++) d[i] += s[i];
-        }
+        // Não acontece: a principal junta main + old (CmdSwapMain) antes deste comando. Sem somar
+        // aqui (O(N) no áudio): a old é devolvida e a layer vira a nova old, como no espelho.
+        mInconsistent.fetch_add(1, std::memory_order_relaxed);
         retire(tr.old);
       }
       tr.old = tr.layer;
@@ -925,17 +966,12 @@ void LooperCore::applyCommand(const Command& c) {
         AudioTrack& tr = mAudio[i];
         if (!tr.hasRec) continue;
         if (tr.isBase) {
-          if (tr.started) { closeBase(i, mG); if (mAudio[i].hasRec) finishRecording(i); }
+          if (tr.started) { closeBase(i, mG); if (mAudio[i].hasRec) finishRecording(i, false); }
           else { resetAudioTrack(i); emit(EvBaseDiscarded, i); }
         } else if (tr.started) {
           finishRecording(i);
         } else {
-          retire(tr.rec);
-          tr.rec = Buffer();
-          tr.hasRec = false;
-          if (!tr.main.data) { tr.length = 0; tr.anchor = 0; mTrackLen[i].store(0); mTrackAnchor[i].store(0); }
-          mTrackBusy[i].store(false);
-          emit(EvCancelled, i);
+          cancelRec(i);
         }
       }
       mPlayingAudio = false;
@@ -1042,11 +1078,13 @@ void LooperCore::process(const float* const* in, float* const* out, int frames) 
             if (w >= 0 && w < tr.rec.capacity) {
               tr.rec.ch(0)[w] += x0;
               tr.rec.ch(1)[w] += x1;
+              tr.wrote = true;
             }
           } else if (tr.length > 0) {
             const int64_t w = wrap(mG - latency - tr.anchor, tr.length);
             tr.rec.ch(0)[w] += x0;
             tr.rec.ch(1)[w] += x1;
+            tr.wrote = true;
           }
         }
         if (!tr.isBase && mG + 1 >= tr.stopG + latency) finishRecording(t);

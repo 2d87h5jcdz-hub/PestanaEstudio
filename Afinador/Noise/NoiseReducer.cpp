@@ -87,7 +87,10 @@ void NoiseReducer::clearProfile() {
 
 void NoiseReducer::startLearning(double seconds) {
   const int frames = std::max(4, static_cast<int>(seconds * mSampleRate / mHop));
+  // Sob o mutex: o áudio só limpa mLearning (na publicação) se não houver pedido novo pendente.
+  std::lock_guard<std::mutex> lock(mSwapMutex);
   mLearnFramesWanted.store(frames);
+  mLearnRequested.store(true, std::memory_order_release);
   mLearning.store(true);
 }
 
@@ -101,10 +104,18 @@ int NoiseReducer::copyProfile(float* out, int max) const {
 }
 
 void NoiseReducer::syncProfile() {
-  if (!mPendingToRT.load(std::memory_order_acquire) && !mLearnedReady) return;   // nada a trocar
+  if (!mPendingToRT.load(std::memory_order_acquire) && !mLearnedReady &&
+      !mLearnRequested.load(std::memory_order_acquire)) return;   // nada a trocar
   std::unique_lock<std::mutex> lock(mSwapMutex, std::try_to_lock);
   if (!lock.owns_lock()) return;                 // a principal está mexendo: tenta no próximo quadro
   const size_t nb = mProfileRT.size();
+  if (mLearnRequested.load()) {
+    // Pedido novo: recomeça do zero (sem sobras de um aprendizado anterior).
+    mLearnRequested.store(false);
+    mLearnActive = true;
+    mLearnFrames = 0;
+    std::fill(mLearnAcc.begin(), mLearnAcc.end(), 0.0);
+  }
   if (mPendingToRT.load()) {
     if (mSharedHas) std::copy(mProfileShared.begin(), mProfileShared.end(), mProfileRT.begin());
     mHasProfileRT = mSharedHas;
@@ -118,7 +129,8 @@ void NoiseReducer::syncProfile() {
     mHasProfileRT = true;
     mLearnedReady = false;
     mHasProfile.store(true);
-    mLearning.store(false);
+    // Um startLearning feito entre o fim e a publicação continua valendo (mLearnActive).
+    if (!mLearnActive) mLearning.store(false);
   }
 }
 
@@ -185,7 +197,7 @@ void NoiseReducer::processFrame(int nch) {
     mPower[static_cast<size_t>(k)] = p / static_cast<float>(nch);
   }
 
-  if (mLearning.load() && !mLearnedReady) {
+  if (mLearnActive) {
     for (int k = 0; k < nb; k++) mLearnAcc[static_cast<size_t>(k)] += mPower[static_cast<size_t>(k)];
     if (++mLearnFrames >= mLearnFramesWanted.load()) {
       for (int k = 0; k < nb; k++) {
@@ -196,6 +208,7 @@ void NoiseReducer::processFrame(int nch) {
       }
       mHasProfileRT = true;
       mLearnFrames = 0;
+      mLearnActive = false;
       mLearnedReady = true;   // publicado no próximo try_lock (isLearning fica true até lá)
       syncProfile();
     }

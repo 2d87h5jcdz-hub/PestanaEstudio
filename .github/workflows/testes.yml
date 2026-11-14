@@ -1,0 +1,48 @@
+name: Testes C++
+
+# Testes do núcleo de áudio (LooperCore, NoiseReducer, GuitarFXCore) com AddressSanitizer + UBSan.
+on:
+  push:
+    branches: [estudio, main]
+    paths:
+      - 'Afinador/**/*.cpp'
+      - 'Afinador/**/*.h'
+      - 'Afinador/**/*.hpp'
+      - 'Vendor/**'
+      - 'tests/**'
+      - '.github/workflows/testes.yml'
+  pull_request:
+    paths:
+      - 'Afinador/**/*.cpp'
+      - 'Afinador/**/*.h'
+      - 'Afinador/**/*.hpp'
+      - 'Vendor/**'
+      - 'tests/**'
+      - '.github/workflows/testes.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: testes-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  testes:
+    name: CTest (ASan + UBSan)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Configurar
+        run: cmake -S tests -B build/testes -DPESTANA_SANITIZE=ON -DCMAKE_CXX_COMPILER=g++ -DCMAKE_BUILD_TYPE=RelWithDebInfo
+
+      - name: Compilar
+        run: cmake --build build/testes -j "$(nproc)"
+
+      - name: Rodar testes
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: ctest --test-dir build/testes --output-on-failure

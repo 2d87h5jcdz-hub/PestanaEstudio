@@ -44,7 +44,8 @@ public:
   void setProfile(const float* profile, int count);
   void clearProfile();
   bool hasProfile() const { return mHasProfile.load(); }
-  /// Aprende o perfil com os próximos `seconds` de entrada (o músico em silêncio).
+  /// Aprende o perfil com os próximos `seconds` de entrada (o músico em silêncio). Sempre começa do
+  /// zero (um aprendizado em andamento recomeça).
   void startLearning(double seconds);
   /// Só volta a false depois que o perfil aprendido foi publicado (copyProfile já o devolve).
   bool isLearning() const { return mLearning.load(); }
@@ -87,8 +88,10 @@ private:
   std::atomic<float> mAmount{0.5f};
 
   // aprendizado (acumulado no áudio)
-  std::atomic<bool> mLearning{false};
+  std::atomic<bool> mLearning{false};         // o que a tela vê (pedido feito e ainda não publicado)
   std::atomic<int> mLearnFramesWanted{0};
+  std::atomic<bool> mLearnRequested{false};   // escrito sob mSwapMutex; o áudio pega no try_lock
+  bool mLearnActive = false;                  // [áudio] acumulando agora
   std::vector<double> mLearnAcc;
   int mLearnFrames = 0;
   std::vector<float> mLearned;    // [áudio] perfil aprendido esperando ser publicado
